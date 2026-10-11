@@ -3,13 +3,15 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: CASCADE simulation API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: cascade
+    description: Simulated shopfloor recovery operations
 paths:
   /healthz:
     get:
@@ -24,6 +26,196 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /cascade/state:
+    get:
+      operationId: getShopState
+      tags: [cascade]
+      summary: Get the current simulated workshop state
+      responses:
+        "200":
+          description: Current workshop state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShopState"
+  /cascade/actions:
+    get:
+      operationId: getActionHistory
+      tags: [cascade]
+      summary: Get the auditable action history
+      responses:
+        "200":
+          description: Action history
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ActionEvent"
+  /cascade/disruptions:
+    post:
+      operationId: simulateDisruption
+      tags: [cascade]
+      summary: Simulate a supplier disruption
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DisruptionInput"
+      responses:
+        "200":
+          description: Disruption impact
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImpactAnalysis"
+        "400":
+          description: Invalid disruption
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /cascade/impact:
+    post:
+      operationId: analyzeImpact
+      tags: [cascade]
+      summary: Recalculate disruption impact
+      responses:
+        "200":
+          description: Impact analysis
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImpactAnalysis"
+        "409":
+          description: No disruption is active
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /cascade/recovery-plans:
+    post:
+      operationId: proposeRecovery
+      tags: [cascade]
+      summary: Compare deterministic recovery alternatives
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecoveryRequest"
+      responses:
+        "200":
+          description: Feasible and infeasible recovery alternatives
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RecoveryPlan"
+        "409":
+          description: No disruption is active
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /cascade/recovery-plans/{planId}/approve:
+    post:
+      operationId: approveRecovery
+      tags: [cascade]
+      summary: Approve a recovery plan without executing it
+      parameters:
+        - name: planId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Approved recovery plan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryPlan"
+        "400":
+          description: Invalid approval request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Plan not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /cascade/recovery-plans/{planId}/execute:
+    post:
+      operationId: executeRecovery
+      tags: [cascade]
+      summary: Execute an approved recovery plan once
+      parameters:
+        - name: planId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecuteRecoveryInput"
+      responses:
+        "200":
+          description: Updated simulated workshop state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShopState"
+        "400":
+          description: Plan has not been approved or request is invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Plan not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /cascade/recovery-plans/{planId}/verify:
+    post:
+      operationId: verifyRecovery
+      tags: [cascade]
+      summary: Verify the executed plan against the current simulated state
+      parameters:
+        - name: planId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Verification result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerificationResult"
+        "400":
+          description: Plan has not been executed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Plan not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 components:
   schemas:
     HealthStatus:
@@ -33,4 +225,207 @@ components:
           type: string
       required:
         - status
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error
+    Priority:
+      type: string
+      enum: [urgent, high, standard]
+    OrderStatus:
+      type: string
+      enum: [on_track, at_risk, late, complete]
+    TaskStatus:
+      type: string
+      enum: [queued, scheduled, complete]
+    ShopOrder:
+      type: object
+      properties:
+        id: { type: string }
+        customer: { type: string }
+        product: { type: string }
+        quantity: { type: integer }
+        dueDate: { type: string, format: date }
+        priority: { $ref: "#/components/schemas/Priority" }
+        status: { $ref: "#/components/schemas/OrderStatus" }
+        taskIds:
+          type: array
+          items: { type: string }
+      required: [id, customer, product, quantity, dueDate, priority, status, taskIds]
+    Material:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        unit: { type: string }
+        available: { type: number }
+        delayedShipment: { type: number }
+        supplier: { type: string }
+        scheduledArrival: { type: string, format: date }
+        alternateSupplier: { type: string }
+        alternateAvailable: { type: boolean }
+        expediteCost: { type: number }
+      required: [id, name, unit, available, delayedShipment, supplier, scheduledArrival, alternateSupplier, alternateAvailable, expediteCost]
+    Machine:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        hoursPerDay: { type: number }
+      required: [id, name, hoursPerDay]
+    ProductionTask:
+      type: object
+      properties:
+        id: { type: string }
+        orderId: { type: string }
+        name: { type: string }
+        machineId: { type: string }
+        materialId: { type: string }
+        materialQuantity: { type: number }
+        durationHours: { type: number }
+        dependsOn:
+          type: array
+          items: { type: string }
+        scheduledDate: { type: string, format: date }
+        status: { $ref: "#/components/schemas/TaskStatus" }
+      required: [id, orderId, name, machineId, materialId, materialQuantity, durationHours, dependsOn, scheduledDate, status]
+    Disruption:
+      type: object
+      properties:
+        id: { type: string }
+        materialId: { type: string }
+        materialName: { type: string }
+        delayDays: { type: integer }
+        originalArrivalDate: { type: string, format: date }
+        revisedArrivalDate: { type: string, format: date }
+        reportedAt: { type: string, format: date-time }
+        simulationLabel: { type: string }
+      required: [id, materialId, materialName, delayDays, originalArrivalDate, revisedArrivalDate, reportedAt, simulationLabel]
+    RecoveryPlan:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        strategy: { type: string }
+        targetOrderId: { type: string }
+        feasible: { type: boolean }
+        cost: { type: number }
+        onTimeOrders: { type: integer }
+        lateOrders: { type: integer }
+        affectedOrders:
+          type: array
+          items: { type: string }
+        risks:
+          type: array
+          items: { type: string }
+        rationale: { type: string }
+        actions:
+          type: array
+          items: { type: string }
+        status:
+          type: string
+          enum: [proposed, approved, executed, verified, superseded]
+      required: [id, name, strategy, targetOrderId, feasible, cost, onTimeOrders, lateOrders, affectedOrders, risks, rationale, actions, status]
+    ActionEvent:
+      type: object
+      properties:
+        id: { type: string }
+        action: { type: string }
+        description: { type: string }
+        timestamp: { type: string, format: date-time }
+        planId:
+          type: [string, "null"]
+        status: { type: string }
+      required: [id, action, description, timestamp, planId, status]
+    DisruptionInput:
+      type: object
+      properties:
+        materialId: { type: string, minLength: 1 }
+        delayDays: { type: integer, minimum: 1, maximum: 14 }
+      required: [materialId, delayDays]
+    RecoveryRequest:
+      type: object
+      properties:
+        targetOrderId: { type: string, minLength: 1 }
+      required: [targetOrderId]
+    ExecuteRecoveryInput:
+      type: object
+      properties:
+        requestId: { type: string, minLength: 1 }
+      required: [requestId]
+    ImpactAnalysis:
+      type: object
+      properties:
+        disruption: { $ref: "#/components/schemas/Disruption" }
+        summary: { type: string }
+        affectedOrderIds:
+          type: array
+          items: { type: string }
+        affectedTaskIds:
+          type: array
+          items: { type: string }
+        graphNodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphNode"
+        graphEdges:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphEdge"
+      required: [disruption, summary, affectedOrderIds, affectedTaskIds, graphNodes, graphEdges]
+    GraphNode:
+      type: object
+      properties:
+        id: { type: string }
+        label: { type: string }
+        kind:
+          type: string
+          enum: [material, task, order]
+        status: { type: string }
+      required: [id, label, kind, status]
+    GraphEdge:
+      type: object
+      properties:
+        from: { type: string }
+        to: { type: string }
+      required: [from, to]
+    ShopState:
+      type: object
+      properties:
+        scenarioName: { type: string }
+        simulationLabel: { type: string }
+        lastUpdated: { type: string, format: date-time }
+        disruption:
+          anyOf:
+            - $ref: "#/components/schemas/Disruption"
+            - type: "null"
+        orders:
+          type: array
+          items: { $ref: "#/components/schemas/ShopOrder" }
+        materials:
+          type: array
+          items: { $ref: "#/components/schemas/Material" }
+        machines:
+          type: array
+          items: { $ref: "#/components/schemas/Machine" }
+        tasks:
+          type: array
+          items: { $ref: "#/components/schemas/ProductionTask" }
+        plans:
+          type: array
+          items: { $ref: "#/components/schemas/RecoveryPlan" }
+      required: [scenarioName, simulationLabel, lastUpdated, disruption, orders, materials, machines, tasks, plans]
+    VerificationResult:
+      type: object
+      properties:
+        verified: { type: boolean }
+        message: { type: string }
+        planId: { type: string }
+        onTimeOrders: { type: integer }
+        lateOrders: { type: integer }
+        stateMatches: { type: boolean }
+      required: [verified, message, planId, onTimeOrders, lateOrders, stateMatches]
 

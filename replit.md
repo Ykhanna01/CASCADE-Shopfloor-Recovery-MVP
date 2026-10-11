@@ -1,15 +1,18 @@
-# [Project name]
+# CASCADE — Shopfloor Recovery Agent
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+CASCADE is a voice-first simulator that models supplier disruptions in a fictional custom-production workshop and compares deterministic recovery plans.
 
 ## Run & Operate
 
 - `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
+- `pnpm --filter @workspace/api-server run test` — test deterministic recovery logic
+- `pnpm --filter @workspace/cascade run dev` — run the browser simulator
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
 - Required env: `DATABASE_URL` — Postgres connection string
+- MCP: `POST /api/mcp` using Streamable HTTP, protocol version `2025-11-25`
 
 ## Stack
 
@@ -18,19 +21,28 @@ _Replace the heading above with the project's name, and this line with one sente
 - DB: PostgreSQL + Drizzle ORM
 - Validation: Zod (`zod/v4`), `drizzle-zod`
 - API codegen: Orval (from OpenAPI spec)
+- MCP: official `@modelcontextprotocol/sdk`, Streamable HTTP
 - Build: esbuild (CJS bundle)
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/cascade` — React/Vite operations simulator
+- `artifacts/api-server/src/lib/cascade` — deterministic scenario, impact, recovery, persistence, and MCP tools
+- `lib/api-spec/openapi.yaml` — REST contract used by generated hooks and validation
+- `lib/db/src/schema/cascade-state.ts` — persistent simulated state row
+- `README.md` — run steps, MCP tools, test commands, and scenario
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- The API's REST routes and MCP tools dispatch through the same deterministic domain functions.
+- One PostgreSQL row stores the demo state, plans, idempotency records, and audit history; mutations lock that row in a transaction.
+- The MCP endpoint is stateless between HTTP requests; shop state itself is persisted.
+- Simulated data and mutations never contact real suppliers or production systems.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- Inspect eight customer orders, four shared materials, machine capacity, and dependent production tasks.
+- Simulate a two-day supplier delay, review its production graph, compare recovery alternatives, approve and execute a plan, verify the resulting order statuses, and inspect the action history.
 
 ## User preferences
 
@@ -38,7 +50,9 @@ _Populate as you build — explicit user instructions worth remembering across s
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- After changing `lib/api-spec/openapi.yaml`, run codegen before building against generated schemas or hooks.
+- Push new development schema changes with `pnpm --filter @workspace/db run push`.
+- Do not present the fictional shop, customers, supplier names, or recovery costs as real.
 
 ## Pointers
 
