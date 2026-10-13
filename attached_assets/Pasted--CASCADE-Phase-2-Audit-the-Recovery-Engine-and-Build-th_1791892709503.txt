@@ -1,0 +1,108 @@
+## CASCADE — Phase 2: Audit the Recovery Engine and Build the Hackathon Demo
+
+Continue working in the existing CASCADE Shopfloor Recovery project. The live MCP end-to-end test has passed, including approval enforcement, execution, verification, idempotency, 10 automated tests, and workspace typechecking.
+
+**Do not restart the project, replace working code, or rebuild the MCP server.** Preserve the existing architecture, database, API contracts, and all eight MCP tools.
+
+### Phase 1 — Audit the existing implementation
+
+Before changing code, inspect the actual recovery engine, database schema, API routes, frontend, and tests.
+
+The verified scenario has:
+- 8 customer orders and 4 materials.
+- A simulated two-day plywood shipment delay.
+- An initial inventory of 3 plywood sheets.
+- Three recovery plans:
+  1. Full expedite: $520, 8 orders on time, 0 late.
+  2. Local buy to protect Palmer: $470, 5 orders on time, 3 late.
+  3. Wait: $500, 3 orders on time, 5 late.
+
+Audit whether plan generation, predicted outcomes, execution, and verification all use the same deterministic scheduling and constraint logic.
+
+Specifically investigate:
+- Why the local-buy plan was selected despite leaving three orders late.
+- Whether each plan's cost and on-time/late counts are computed rather than hardcoded.
+- Whether material availability, task dependencies, machine capacity, order deadlines, and existing commitments are enforced.
+- Whether executing a plan applies exactly the changes predicted by that plan.
+- Whether the verification tool independently checks the persisted result.
+
+Do not assume the current implementation is wrong merely because plans have different trade-offs. Identify actual defects and document the findings.
+
+### Phase 2 — Improve recovery decision-making
+
+Implement or refine a deterministic recovery evaluator that compares feasible plans using explicit objectives and constraints.
+
+Requirements:
+1. Enforce material availability, machine capacity, task dependencies, and order deadlines.
+2. Calculate each plan's cost, on-time orders, late orders, affected customers, schedule changes, and risks from the actual scenario.
+3. Distinguish hard constraints from preferences. For example, protecting Palmer's Friday deadline must not silently imply that other customers' deadlines do not matter.
+4. Explain why a plan is recommended and what trade-offs it creates.
+5. Never label a plan feasible if its schedule violates a hard constraint.
+6. Ensure the predicted plan outcome matches the executed and persisted schedule.
+7. Preserve explicit approval before any execution and preserve idempotent retries.
+
+Use deterministic algorithms for scheduling and feasibility. Use AI only where useful for natural-language interpretation and explanations; do not let an LLM invent costs, inventory, or schedule outcomes.
+
+Add regression tests for infeasible plans, material shortages, capacity conflicts, missed dependencies, deadline trade-offs, pre-approval rejection, execution consistency, and duplicate execution requests.
+
+### Phase 3 — Build the CASCADE demo interface
+
+Inspect the current frontend and extend it rather than replacing it.
+
+Build a polished, responsive, professional operations-control dashboard suitable for a competitive hackathon demonstration.
+
+The primary workflow must be:
+
+1. **Workshop overview:** display current orders, materials, deadlines, and machine capacity.
+2. **Disruption intake:** allow the user to enter or select a supplier/material disruption. Include the existing two-day plywood delay scenario.
+3. **Impact analysis:** show affected orders, delayed tasks, dependency relationships, and deadline risks.
+4. **Recovery comparison:** present the available plans side by side, including cost, on-time and late orders, risks, and the reason for each recommendation.
+5. **Approval gate:** require an explicit user action before executing a plan.
+6. **Execution feedback:** show the actions performed and the resulting schedule changes.
+7. **Verification:** display the independently verified final state and whether it matches the predicted outcome.
+
+Make the differences between simulated, proposed, approved, executed, and verified states visually clear. Include loading states, errors, empty states, and useful feedback.
+
+The UI must call the real existing backend/API. Do not fabricate results or implement a frontend-only simulation that bypasses the recovery engine.
+
+### Phase 4 — Demonstrate the product's key differentiator
+
+The demo should tell this story:
+
+"Our plywood shipment is delayed by two days. Can we still deliver the Palmer order on Friday without making our other customers late?"
+
+Show CASCADE analyzing the disruption, comparing recovery options, explaining trade-offs, obtaining approval, executing the selected plan, and verifying the final schedule.
+
+Make it clear when no plan can meet every deadline. Do not claim that real suppliers or customers were contacted.
+
+### Phase 5 — Verify the finished implementation
+
+After implementation:
+- Run the entire workspace typecheck and automated test suite.
+- Test the complete workflow through the running application.
+- Verify that the UI reflects persisted backend state after refreshing.
+- Confirm that an unapproved plan cannot execute.
+- Confirm that repeated execution cannot duplicate changes.
+- Verify consistency between predicted and actual schedule outcomes.
+- Preserve the existing verified scenario as a regression reference, using a separate test fixture or controlled reset when needed.
+
+### Constraints
+
+- No complete rewrite.
+- No unnecessary new infrastructure or external integrations.
+- No autonomous purchasing or external customer communications.
+- No fake success states or hardcoded recovery results.
+- Prioritize a working, visually polished, reproducible hackathon demo over adding features.
+
+### Final report
+
+When finished, report:
+1. What you inspected and changed.
+2. Any genuine defects found and how they were fixed.
+3. The final recovery-engine behavior and decision criteria.
+4. The UI workflow completed.
+5. Actual test commands and results.
+6. Any remaining blockers or untested functionality.
+7. The single highest-priority next task.
+
+Do not claim a feature or test passed unless you actually ran and verified it.

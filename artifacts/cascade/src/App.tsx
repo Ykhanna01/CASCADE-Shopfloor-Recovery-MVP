@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query';
 import {
@@ -80,6 +80,7 @@ function Home() {
   const [showHistory, setShowHistory] = useState(false);
   const [notice, setNotice] = useState('');
   const [voiceListening, setVoiceListening] = useState(false);
+  const analyzedDisruptionId = useRef('');
 
   const state = shop.data;
   const orders = state?.orders ?? [];
@@ -102,6 +103,30 @@ function Home() {
   };
   const errorText = firstError instanceof Error ? firstError.message : firstError ? 'The service could not complete that request.' : '';
 
+  useEffect(() => {
+    const disruption = state?.disruption;
+    if (!disruption) {
+      analyzedDisruptionId.current = '';
+      setImpact(null);
+      return;
+    }
+    if (analyzedDisruptionId.current === disruption.id) return;
+    analyzedDisruptionId.current = disruption.id;
+    setImpact(null);
+    analyzeMutation.mutate(undefined, {
+      onSuccess: (result) => setImpact(result),
+    });
+  }, [state?.disruption?.id]);
+
+  useEffect(() => {
+    if (!state?.plans.length) return;
+    const availablePlans = alternatives.length ? alternatives : state.plans;
+    if (availablePlans.some((plan) => plan.id === activePlanId)) return;
+    const statusRank: Record<string, number> = { verified: 4, executed: 3, approved: 2, proposed: 1, superseded: 0 };
+    const preferred = [...availablePlans].sort((a, b) => (statusRank[b.status] ?? -1) - (statusRank[a.status] ?? -1))[0];
+    if (preferred) setActivePlanId(preferred.id);
+  }, [state?.plans, alternatives, activePlanId]);
+
   const runSimulation = () => {
     if (!selectedMaterialId) return;
     setNotice('');
@@ -109,6 +134,7 @@ function Home() {
     simulateMutation.mutate({ data: { materialId: selectedMaterialId, delayDays: Number(delayDays) } }, {
       onSuccess: (result) => {
         setImpact(result);
+        analyzedDisruptionId.current = result.disruption.id;
         setAlternatives([]);
         setActivePlanId('');
         refreshWorkspace();
@@ -269,20 +295,22 @@ function Home() {
           <section className="panel" aria-labelledby="impact-heading">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[hsl(var(--border))] px-5 py-3.5">
               <div className="flex items-center gap-2"><div className="flex h-7 w-7 items-center justify-center rounded bg-amber-100 text-amber-800"><Activity size={16} /></div><h2 id="impact-heading" className="text-sm font-semibold">Impact & dependencies</h2></div>
-              <div className="flex items-center gap-2"><span className="eyebrow">02 / Shop-floor exposure</span><Button kind="quiet" testId="button-recalculate-impact" onClick={recalculateImpact} disabled={anyPending}><RefreshCw size={13} /> Recalculate</Button></div>
+              <div className="flex items-center gap-2"><span className="eyebrow">02 / Shop-floor exposure</span><Button kind="quiet" testId="button-recalculate-impact" onClick={recalculateImpact} disabled={anyPending}><RefreshCw size={13} className={analyzeMutation.isPending ? 'animate-spin' : ''} /> {analyzeMutation.isPending ? 'Analyzing' : 'Recalculate'}</Button></div>
             </div>
             {activeDisruption ? <div className="p-5">
               <div className="flex flex-col justify-between gap-3 rounded-md border border-amber-200 bg-amber-50/75 p-4 sm:flex-row sm:items-center">
                 <div className="flex gap-3"><div className="mt-0.5 text-amber-800"><Truck size={18} /></div><div><div className="flex flex-wrap items-center gap-2"><strong className="text-sm">{activeDisruption.materialName} shipment delayed</strong><Status tone="warn">+{activeDisruption.delayDays} days</Status></div><p className="mt-1 text-xs text-amber-900/75">{activeDisruption.simulationLabel || 'Simulated supplier disruption'} · Reported {formatTime(activeDisruption.reportedAt)}</p></div></div>
-                <div className="flex gap-5 pl-8 sm:pl-0"><Metric label="Orders exposed" value={String(affectedOrderIds.length)} /><Metric label="Tasks affected" value={String(affectedTaskIds.length)} /></div>
+                <div className="flex gap-5 pl-8 sm:pl-0"><Metric label="Orders exposed" value={impact ? String(affectedOrderIds.length) : '—'} /><Metric label="Tasks affected" value={impact ? String(affectedTaskIds.length) : '—'} /></div>
               </div>
-              <p className="my-4 text-sm leading-relaxed text-muted-foreground" data-testid="text-impact-summary">{impact?.summary || 'A simulated disruption is active. Recalculate to review its current schedule exposure.'}</p>
-              {affectedOrderIds.length > 0 ? <div className="mb-4 flex flex-wrap gap-2" data-testid="list-affected-orders">
+              {analyzeMutation.isPending && !impact ? <div className="my-4 flex items-center gap-2 rounded border border-[hsl(var(--border))] bg-[hsl(var(--background))] px-3 py-3 text-xs text-muted-foreground" role="status" data-testid="status-impact-loading"><RefreshCw size={14} className="animate-spin text-primary" /> Restoring impact analysis from the simulated shop state…</div> :
+                analyzeMutation.isError && !impact ? <div className="my-4 flex items-center justify-between gap-3 rounded border border-rose-200 bg-rose-50 px-3 py-3 text-xs text-rose-900" role="alert" data-testid="status-impact-error"><span>Impact analysis could not be restored. {analyzeMutation.error instanceof Error ? analyzeMutation.error.message : 'Try recalculating.'}</span><Button kind="secondary" testId="button-retry-impact" onClick={recalculateImpact}><RefreshCw size={13} /> Retry</Button></div> :
+                <p className="my-4 text-sm leading-relaxed text-muted-foreground" data-testid="text-impact-summary">{impact?.summary || 'A simulated disruption is active. Its affected orders and tasks will appear after analysis completes.'}</p>}
+              {impact && affectedOrderIds.length > 0 ? <div className="mb-4 flex flex-wrap gap-2" data-testid="list-affected-orders">
                 {affectedOrderIds.map((id) => {
                   const order = orderById.get(id);
                   return <span key={id} data-testid={`chip-affected-order-${id}`} className="inline-flex items-center gap-1.5 rounded border border-amber-200 bg-[hsl(var(--card))] px-2.5 py-1.5 text-xs"><span className="mono text-[10px] text-muted-foreground">{id}</span><span className="font-semibold">{order?.customer ?? id}</span><span className="text-muted-foreground">· {order?.product ?? 'Affected order'}</span></span>;
                 })}
-              </div> : <div className="mb-4 rounded border border-dashed border-[hsl(var(--border))] px-3 py-3 text-xs text-muted-foreground" data-testid="empty-affected-orders">No affected orders were returned for this disruption.</div>}
+              </div> : impact ? <div className="mb-4 rounded border border-dashed border-[hsl(var(--border))] px-3 py-3 text-xs text-muted-foreground" data-testid="empty-affected-orders">The simulator returned no affected orders for this disruption.</div> : null}
               {impact && <DependencyGraph impact={impact} />}
             </div> : <EmptyBlock icon={<Layers3 size={19} />} title="No active disruption analysis" detail="Simulate a supplier delay to trace material, task, and order dependencies from the live workshop model." />}
           </section>

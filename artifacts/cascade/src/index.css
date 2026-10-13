@@ -93,17 +93,28 @@
 
 @layer base {
   * { @apply border-border; }
-  body { @apply bg-background text-foreground antialiased; font-family: var(--app-font-sans); }
+  html { scroll-behavior: smooth; }
+  body { @apply bg-background text-foreground antialiased; font-family: var(--app-font-sans); min-width: 320px; }
   button, input, select { font: inherit; }
+  button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible {
+    outline: 2px solid hsl(var(--primary));
+    outline-offset: 2px;
+  }
 }
 
 .mono { font-family: var(--app-font-mono); }
 .display { font-family: 'Space Grotesk', sans-serif; }
-.panel { background: hsl(var(--card)); border: 1px solid hsl(var(--border)); border-radius: 10px; box-shadow: var(--shadow-sm); }
+.panel { background: hsl(var(--card)); border: 1px solid hsl(var(--border)); border-radius: 10px; box-shadow: var(--shadow-sm); animation: panel-arrive .42s both; }
 .eyebrow { font-family: var(--app-font-mono); font-size: 10px; letter-spacing: .11em; text-transform: uppercase; color: hsl(var(--muted-foreground)); }
 .status-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 4px; font: 500 10px var(--app-font-mono); letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
 .status-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .scrollbar-thin { scrollbar-width: thin; scrollbar-color: hsl(var(--border)) transparent; }
 .skeleton { background: linear-gradient(90deg, hsl(var(--muted)) 25%, hsl(var(--secondary)) 50%, hsl(var(--muted)) 75%); background-size: 200% 100%; animation: skeleton 1.5s ease-in-out infinite; border-radius: 5px; }
 @keyframes skeleton { to { background-position: -200% 0; } }
-@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+@keyframes panel-arrive { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: translateY(0); } }
+::selection { background: hsl(var(--primary) / .18); color: hsl(var(--foreground)); }
+@media (max-width: 640px) {
+  .panel { border-radius: 8px; }
+  .status-pill { padding: 3px 6px; font-size: 9px; }
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; } }
