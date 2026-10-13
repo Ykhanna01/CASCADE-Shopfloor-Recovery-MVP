@@ -6,6 +6,7 @@ import {
   createInitialState,
   DomainError,
   executeRecovery,
+  getShopView,
   proposeRecovery,
   simulateDisruption,
   verifyRecovery,
@@ -18,6 +19,84 @@ function disruptedScenario() {
   const initial = createInitialState(fixedNow);
   const disrupted = simulateDisruption(initial, "plywood", 2, fixedNow);
   return { initial, disrupted };
+}
+
+function assertIndependentScheduleChecks(
+  state: ReturnType<typeof createInitialState>,
+) {
+  const machineLoads = new Map<string, number>();
+  for (const task of state.tasks) {
+    if (task.status === "complete") continue;
+    const key = `${task.machineId}:${task.scheduledDate}`;
+    machineLoads.set(key, (machineLoads.get(key) ?? 0) + task.durationHours);
+    for (const dependencyId of task.dependsOn) {
+      const dependency = state.tasks.find((item) => item.id === dependencyId);
+      assert.ok(dependency, `missing dependency ${dependencyId}`);
+      assert.ok(
+        dependency.scheduledDate < task.scheduledDate,
+        `${task.id} must follow ${dependencyId}`,
+      );
+    }
+  }
+  for (const [key, hours] of machineLoads) {
+    const machineId = key.slice(0, key.indexOf(":"));
+    const machine = state.machines.find((item) => item.id === machineId)!;
+    assert.ok(
+      hours <= machine.hoursPerDay,
+      `${key} has ${hours} hours above the ${machine.hoursPerDay}-hour limit`,
+    );
+  }
+
+  for (const material of state.materials) {
+    let stock = material.available;
+    const scheduledDates = [
+      ...new Set([
+        material.scheduledArrival,
+        ...state.tasks
+          .filter(
+            (task) =>
+              task.status !== "complete" &&
+              task.materialId === material.id &&
+              task.materialQuantity > 0,
+          )
+          .map((task) => task.scheduledDate),
+      ]),
+    ].sort();
+    for (const date of scheduledDates) {
+      if (date === material.scheduledArrival) stock += material.delayedShipment;
+      const consumed = state.tasks
+        .filter(
+          (task) =>
+            task.status !== "complete" &&
+            task.materialId === material.id &&
+            task.materialQuantity > 0 &&
+            task.scheduledDate === date,
+        )
+        .reduce((total, task) => total + task.materialQuantity, 0);
+      assert.ok(
+        consumed <= stock,
+        `${material.id} consumes ${consumed} on ${date} with ${stock} available`,
+      );
+      stock -= consumed;
+    }
+  }
+
+  for (const order of state.orders) {
+    const finishDate = state.tasks
+      .filter((task) => task.orderId === order.id)
+      .map((task) => task.scheduledDate)
+      .sort()
+      .at(-1);
+    assert.ok(finishDate);
+    const allComplete = order.taskIds.every(
+      (taskId) => state.tasks.find((task) => task.id === taskId)?.status === "complete",
+    );
+    assert.equal(
+      order.status,
+      allComplete ? "complete" : finishDate! > order.dueDate ? "late" : "on_track",
+      `status for ${order.id} must match its actual task dates`,
+    );
+  }
 }
 
 test("demo scenario is internally consistent and contains eight customer orders", () => {
@@ -96,9 +175,9 @@ test("impact analysis traces plywood through dependent tasks to every exposed or
   assert.ok(impact.graphEdges.some((edge) => edge.from === "task:pal-finish" && edge.to === "order:PAL-204"));
 });
 
-test("two feasible recovery alternatives compare costs and delivery outcomes", () => {
+test("recovery alternatives are ranked from the computed schedule and explicit trade-offs", () => {
   const { disrupted } = disruptedScenario();
-  const { plans } = proposeRecovery(disrupted, "PAL-204", fixedNow);
+  const { state, plans } = proposeRecovery(disrupted, "PAL-204", fixedNow);
   const feasible = plans.filter((plan) => plan.feasible);
 
   assert.equal(plans.length, 3);
@@ -106,10 +185,32 @@ test("two feasible recovery alternatives compare costs and delivery outcomes", (
   assert.equal(feasible[0]?.cost, 520);
   assert.equal(feasible[0]?.onTimeOrders, 8);
   assert.equal(feasible[0]?.lateOrders, 0);
-  assert.equal(feasible[1]?.cost, 470);
-  assert.equal(feasible[1]?.onTimeOrders, 5);
-  assert.equal(feasible[1]?.lateOrders, 3);
+  assert.match(feasible[0]?.rationale ?? "", /^Recommended by policy/);
+  const localBuy = plans.find((plan) => plan.id.endsWith("-protect-target"))!;
+  assert.equal(localBuy.feasible, true);
+  assert.equal(localBuy.cost, 310);
+  assert.equal(localBuy.onTimeOrders, 6);
+  assert.equal(localBuy.lateOrders, 2);
+  assert.deepEqual(localBuy.affectedOrders, [
+    "BRK-118",
+    "MOR-031",
+    "NG-007",
+    "RIV-052",
+  ]);
+  assert.match(localBuy.rationale, /Non-target due dates remain visible/);
+  assert.ok(
+    localBuy.actions.some((action) =>
+      action.includes("BRK-118 (Brookside): Cut cabinet panels 2026-10-16"),
+    ),
+  );
   assert.equal(plans[2]?.feasible, false);
+  assert.match(plans[2]?.rationale ?? "", /Hard target deadline missed/);
+  assert.equal(
+    Object.keys(state.recoveryProjections).length,
+    3,
+    "each alternative keeps its exact private schedule projection",
+  );
+  assert.equal("recoveryProjections" in getShopView(state), false);
 });
 
 test("plan proposal is idempotent and invalid order IDs fail explicitly", () => {
@@ -147,7 +248,7 @@ test("execution requires approval, is idempotent, and verification matches persi
 
   const approved = approveRecovery(proposedState, plan.id, fixedNow);
   const executed = executeRecovery(approved, plan.id, "request-1", fixedNow);
-  const duplicate = executeRecovery(executed, plan.id, "request-2", fixedNow);
+  const duplicate = executeRecovery(executed, plan.id, "request-1", fixedNow);
   assert.strictEqual(duplicate, executed);
   assert.equal(
     executed.actionHistory.filter((action) => action.action === "recovery_executed").length,
@@ -164,6 +265,7 @@ test("execution requires approval, is idempotent, and verification matches persi
   assert.equal(verification.result.stateMatches, true);
   assert.equal(verification.result.onTimeOrders, 8);
   assert.equal(verification.result.lateOrders, 0);
+  assertIndependentScheduleChecks(verification.state);
   assert.equal(
     verification.state.plans.find((item) => item.id === plan.id)?.status,
     "verified",

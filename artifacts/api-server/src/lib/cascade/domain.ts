@@ -120,9 +120,25 @@ export interface ShopState {
   plans: RecoveryPlan[];
 }
 
+interface RecoveryProjection {
+  planId: string;
+  inputFingerprint: string;
+  taskDates: Record<string, string>;
+  orderStatuses: Record<string, OrderStatus>;
+  materialAvailable: Record<string, number>;
+  materialArrivalDates: Record<string, string>;
+  changedOrderIds: string[];
+  onTimeOrders: number;
+  lateOrders: number;
+  feasible: boolean;
+  hardViolations: string[];
+  localPurchaseUnits: number;
+}
+
 export interface PersistedShopState extends ShopState {
   actionHistory: ActionEvent[];
   executedRequestIds: string[];
+  recoveryProjections: Record<string, RecoveryProjection>;
 }
 
 export class DomainError extends Error {
@@ -335,6 +351,7 @@ export function createInitialState(now = new Date()): PersistedShopState {
     plans: [],
     actionHistory: [],
     executedRequestIds: [],
+    recoveryProjections: {},
   };
 }
 
@@ -380,32 +397,590 @@ function addBusinessDays(isoDate: string, days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
-function targetProtectionSchedule(
+type RecoveryKind = "expedite" | "protect-target" | "wait";
+
+interface ScheduleAttempt {
+  taskDates: Map<string, string>;
+  hardViolations: string[];
+}
+
+const LOCAL_UNIT_COST = 110;
+const LATE_ORDER_PENALTY = 100;
+const MAX_SCHEDULE_DAYS = 120;
+
+function nextOrSameBusinessDay(isoDate: string): string {
+  let date = isoDate;
+  while (true) {
+    const weekday = new Date(`${date}T00:00:00.000Z`).getUTCDay();
+    if (weekday !== 0 && weekday !== 6) return date;
+    date = addCalendarDays(date, 1);
+  }
+}
+
+function nextBusinessDay(isoDate: string): string {
+  return addBusinessDays(isoDate, 1);
+}
+
+function orderSortKey(state: PersistedShopState, orderId: string): [string, number, string] {
+  const order = state.orders.find((item) => item.id === orderId);
+  const priority = order?.priority === "urgent" ? 0 : order?.priority === "high" ? 1 : 2;
+  return [order?.dueDate ?? "9999-12-31", priority, orderId];
+}
+
+function compareTaskPriority(
   state: PersistedShopState,
-  targetOrderId: string,
-): Map<string, string[]> {
-  if (!state.disruption) return new Map();
-  const affectedIds = new Set(analyzeImpact(state).affectedOrderIds);
-  const otherAffectedOrders = state.orders
-    .filter((order) => order.id !== targetOrderId && affectedIds.has(order.id))
-    .sort((a, b) => a.dueDate.localeCompare(b.dueDate) || a.id.localeCompare(b.id));
-  return new Map(
-    otherAffectedOrders.map((order, index) => {
-      const daysAfterArrival = index < 2 ? 0 : 1;
-      const startDate = addBusinessDays(
-        state.disruption!.revisedArrivalDate,
-        daysAfterArrival,
+  left: ProductionTask,
+  right: ProductionTask,
+): number {
+  const leftKey = orderSortKey(state, left.orderId);
+  const rightKey = orderSortKey(state, right.orderId);
+  return (
+    leftKey[0].localeCompare(rightKey[0]) ||
+    leftKey[1] - rightKey[1] ||
+    leftKey[2].localeCompare(rightKey[2]) ||
+    left.id.localeCompare(right.id)
+  );
+}
+
+function tasksInDependencyOrder(
+  state: PersistedShopState,
+): { tasks: ProductionTask[]; violations: string[] } {
+  const byId = new Map(state.tasks.map((item) => [item.id, item]));
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+  const emitted = new Set<string>();
+  const ordered: ProductionTask[] = [];
+  const violations: string[] = [];
+
+  const visit = (item: ProductionTask) => {
+    if (visited.has(item.id)) return;
+    if (visiting.has(item.id)) {
+      violations.push(`Task dependency cycle includes ${item.id}.`);
+      return;
+    }
+    visiting.add(item.id);
+    for (const dependencyId of [...item.dependsOn].sort()) {
+      const dependency = byId.get(dependencyId);
+      if (!dependency) {
+        violations.push(`Task ${item.id} depends on missing task ${dependencyId}.`);
+        continue;
+      }
+      visit(dependency);
+    }
+    visiting.delete(item.id);
+    visited.add(item.id);
+    if (!emitted.has(item.id)) {
+      ordered.push(item);
+      emitted.add(item.id);
+    }
+  };
+
+  for (const item of [...state.tasks].sort((a, b) => compareTaskPriority(state, a, b))) {
+    visit(item);
+  }
+  return { tasks: ordered, violations: [...new Set(violations)] };
+}
+
+function materialScheduleViolations(
+  state: PersistedShopState,
+  taskDates: Map<string, string>,
+  arrivalDates: Record<string, string>,
+  localPurchaseUnits: number,
+  localPurchaseDate: string | undefined,
+): string[] {
+  const violations: string[] = [];
+  for (const material of state.materials) {
+    const supplies = new Map<string, number>();
+    const usage = new Map<string, number>();
+    const arrival = arrivalDates[material.id] ?? material.scheduledArrival;
+    if (material.delayedShipment > 0) {
+      supplies.set(arrival, (supplies.get(arrival) ?? 0) + material.delayedShipment);
+    }
+    if (
+      material.id === state.disruption?.materialId &&
+      localPurchaseUnits > 0 &&
+      localPurchaseDate
+    ) {
+      supplies.set(
+        localPurchaseDate,
+        (supplies.get(localPurchaseDate) ?? 0) + localPurchaseUnits,
       );
+    }
+    for (const item of state.tasks) {
+      const scheduledDate = taskDates.get(item.id);
+      if (
+        !scheduledDate ||
+        item.status === "complete" ||
+        item.materialId !== material.id ||
+        item.materialQuantity <= 0
+      ) {
+        continue;
+      }
+      usage.set(
+        scheduledDate,
+        (usage.get(scheduledDate) ?? 0) + item.materialQuantity,
+      );
+    }
+
+    let available = material.available;
+    const days = [...new Set([...supplies.keys(), ...usage.keys()])].sort();
+    for (const day of days) {
+      available += supplies.get(day) ?? 0;
+      const required = usage.get(day) ?? 0;
+      if (required > available) {
+        violations.push(
+          `Material shortage: ${material.name} needs ${required} ${material.unit} on ${day}, but only ${available} are available.`,
+        );
+        available -= required;
+      } else {
+        available -= required;
+      }
+    }
+  }
+  return violations;
+}
+
+function machineScheduleViolations(
+  state: PersistedShopState,
+  taskDates: Map<string, string>,
+): string[] {
+  const violations: string[] = [];
+  const machines = new Map(state.machines.map((item) => [item.id, item]));
+  const loads = new Map<string, number>();
+  for (const item of state.tasks) {
+    const date = taskDates.get(item.id);
+    if (!date || item.status === "complete") continue;
+    const machine = machines.get(item.machineId);
+    if (!machine) {
+      violations.push(`Task ${item.id} uses missing machine ${item.machineId}.`);
+      continue;
+    }
+    if (item.durationHours <= 0 || item.durationHours > machine.hoursPerDay) {
+      violations.push(
+        `Task ${item.id} requires ${item.durationHours} hours, above ${machine.name}'s ${machine.hoursPerDay}-hour daily capacity.`,
+      );
+      continue;
+    }
+    const key = `${item.machineId}:${date}`;
+    loads.set(key, (loads.get(key) ?? 0) + item.durationHours);
+  }
+  for (const [key, hours] of loads) {
+    const machineId = key.slice(0, key.indexOf(":"));
+    const machine = machines.get(machineId)!;
+    if (hours > machine.hoursPerDay) {
+      violations.push(
+        `${machine.name} is overloaded on ${key.slice(key.indexOf(":") + 1)}: ${hours} of ${machine.hoursPerDay} hours.`,
+      );
+    }
+  }
+  return violations;
+}
+
+function dependencyScheduleViolations(
+  state: PersistedShopState,
+  taskDates: Map<string, string>,
+): string[] {
+  const byId = new Map(state.tasks.map((item) => [item.id, item]));
+  const violations: string[] = [];
+  for (const item of state.tasks) {
+    const scheduledDate = taskDates.get(item.id);
+    if (!scheduledDate) {
+      violations.push(`Task ${item.id} has no scheduled date.`);
+      continue;
+    }
+    for (const dependencyId of item.dependsOn) {
+      const dependency = byId.get(dependencyId);
+      const dependencyDate = taskDates.get(dependencyId);
+      if (!dependency || !dependencyDate) {
+        violations.push(`Task ${item.id} has an unresolved dependency ${dependencyId}.`);
+      } else if (dependencyDate >= scheduledDate) {
+        violations.push(
+          `Task ${item.id} is scheduled before dependency ${dependency.id} is complete.`,
+        );
+      }
+    }
+  }
+  return violations;
+}
+
+function recoveryInputFingerprint(state: PersistedShopState): string {
+  return JSON.stringify({
+    disruption: state.disruption,
+    orders: [...state.orders]
+      .map(({ id, dueDate, priority, taskIds }) => ({ id, dueDate, priority, taskIds }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+    materials: [...state.materials]
+      .map(({ id, available, delayedShipment, scheduledArrival, alternateAvailable, expediteCost }) => ({
+        id,
+        available,
+        delayedShipment,
+        scheduledArrival,
+        alternateAvailable,
+        expediteCost,
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+    machines: [...state.machines]
+      .map(({ id, hoursPerDay }) => ({ id, hoursPerDay }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+    tasks: [...state.tasks]
+      .map(({ id, orderId, machineId, materialId, materialQuantity, durationHours, dependsOn, scheduledDate, status }) => ({
+        id,
+        orderId,
+        machineId,
+        materialId,
+        materialQuantity,
+        durationHours,
+        dependsOn: [...dependsOn].sort(),
+        scheduledDate,
+        status,
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+  });
+}
+
+function buildRecoverySchedule(
+  state: PersistedShopState,
+  kind: RecoveryKind,
+  targetOrderId: string,
+  localPurchaseUnits: number,
+): ScheduleAttempt {
+  if (!state.disruption) {
+    return { taskDates: new Map(), hardViolations: ["No active disruption is available."] };
+  }
+
+  const impact = analyzeImpact(state);
+  const affectedTaskIds = new Set(impact.affectedTaskIds);
+  const reflowTaskIds = new Set(
+    kind === "wait"
+      ? [...affectedTaskIds]
+      : kind === "protect-target"
+        ? [...affectedTaskIds].filter(
+            (taskId) => state.tasks.find((item) => item.id === taskId)?.orderId !== targetOrderId,
+          )
+        : [],
+  );
+  const { tasks: orderedTasks, violations: orderingViolations } =
+    tasksInDependencyOrder(state);
+  const taskDates = new Map<string, string>();
+  for (const item of state.tasks) {
+    if (!reflowTaskIds.has(item.id)) taskDates.set(item.id, item.scheduledDate);
+  }
+
+  const material = state.materials.find(
+    (item) => item.id === state.disruption?.materialId,
+  );
+  const arrivalDates = Object.fromEntries(
+    state.materials.map((item) => [
+      item.id,
+      item.id === state.disruption?.materialId && kind === "expedite"
+        ? state.disruption.originalArrivalDate
+        : item.scheduledArrival,
+    ]),
+  );
+  const targetMaterialTask = state.tasks
+    .filter(
+      (item) =>
+        item.orderId === targetOrderId &&
+        item.materialId === state.disruption?.materialId &&
+        item.materialQuantity > 0,
+    )
+    .sort((a, b) => a.scheduledDate.localeCompare(b.scheduledDate))[0];
+  const localPurchaseDate = targetMaterialTask?.scheduledDate;
+
+  const hardViolations = [...orderingViolations];
+  hardViolations.push(
+    ...machineScheduleViolations(state, taskDates),
+    ...materialScheduleViolations(
+      state,
+      taskDates,
+      arrivalDates,
+      kind === "protect-target" ? localPurchaseUnits : 0,
+      localPurchaseDate,
+    ),
+  );
+  const machineLoad = new Map<string, number>();
+  for (const item of state.tasks) {
+    const date = taskDates.get(item.id);
+    if (!date || item.status === "complete") continue;
+    const key = `${item.machineId}:${date}`;
+    machineLoad.set(key, (machineLoad.get(key) ?? 0) + item.durationHours);
+  }
+
+  const machineById = new Map(state.machines.map((item) => [item.id, item]));
+  for (const item of orderedTasks) {
+    if (!reflowTaskIds.has(item.id) || item.status === "complete") continue;
+    const machine = machineById.get(item.machineId);
+    if (!machine) {
+      hardViolations.push(`Task ${item.id} uses missing machine ${item.machineId}.`);
+      continue;
+    }
+    if (item.durationHours <= 0 || item.durationHours > machine.hoursPerDay) {
+      hardViolations.push(
+        `Task ${item.id} requires ${item.durationHours} hours, above ${machine.name}'s ${machine.hoursPerDay}-hour daily capacity.`,
+      );
+      continue;
+    }
+    let earliest = nextOrSameBusinessDay(state.disruption.revisedArrivalDate);
+    let dependencyBlocked = false;
+    for (const dependencyId of item.dependsOn) {
+      const dependencyDate = taskDates.get(dependencyId);
+      if (!dependencyDate) {
+        hardViolations.push(`Task ${item.id} has an unresolved dependency ${dependencyId}.`);
+        dependencyBlocked = true;
+        continue;
+      }
+      const afterDependency = nextBusinessDay(dependencyDate);
+      if (afterDependency > earliest) earliest = afterDependency;
+    }
+    if (dependencyBlocked) continue;
+
+    let candidate = earliest;
+    const lastCandidate = addCalendarDays(earliest, MAX_SCHEDULE_DAYS);
+    let placed = false;
+    while (candidate <= lastCandidate) {
+      const loadKey = `${item.machineId}:${candidate}`;
+      const currentLoad = machineLoad.get(loadKey) ?? 0;
+      if (currentLoad + item.durationHours <= machine.hoursPerDay) {
+        const candidateDates = new Map(taskDates);
+        candidateDates.set(item.id, candidate);
+        const materialFailures = materialScheduleViolations(
+          state,
+          candidateDates,
+          arrivalDates,
+          kind === "protect-target" ? localPurchaseUnits : 0,
+          localPurchaseDate,
+        );
+        if (materialFailures.length === 0) {
+          taskDates.set(item.id, candidate);
+          machineLoad.set(loadKey, currentLoad + item.durationHours);
+          placed = true;
+          break;
+        }
+      }
+      candidate = nextBusinessDay(candidate);
+    }
+    if (!placed) {
+      const reason = material
+        ? `No material- and capacity-feasible slot within ${MAX_SCHEDULE_DAYS} days for ${item.id}.`
+        : `Material ${state.disruption.materialName} is missing from the shop state.`;
+      hardViolations.push(reason);
+    }
+  }
+
+  const finalHardViolations = [
+    ...hardViolations,
+    ...machineScheduleViolations(state, taskDates),
+    ...dependencyScheduleViolations(state, taskDates),
+    ...materialScheduleViolations(
+      state,
+      taskDates,
+      arrivalDates,
+      kind === "protect-target" ? localPurchaseUnits : 0,
+      localPurchaseDate,
+    ),
+  ];
+  return {
+    taskDates,
+    hardViolations: [...new Set(finalHardViolations)],
+  };
+}
+
+interface EvaluatedRecoveryPlan {
+  projection: RecoveryProjection;
+  cost: number;
+  changedTaskCount: number;
+  lateOrderIds: string[];
+  rationale: string;
+  actions: string[];
+  risks: string[];
+}
+
+function evaluateRecoveryPlan(
+  state: PersistedShopState,
+  planId: string,
+  targetOrderId: string,
+  kind: RecoveryKind,
+): EvaluatedRecoveryPlan {
+  const disruption = state.disruption!;
+  const delayedMaterial = state.materials.find(
+    (item) => item.id === disruption.materialId,
+  );
+  const targetOrder = state.orders.find((item) => item.id === targetOrderId)!;
+  const targetTasks = state.tasks.filter((item) => item.orderId === targetOrderId);
+  const targetMaterialTasks = targetTasks.filter(
+    (item) =>
+      item.materialId === disruption.materialId &&
+      item.materialQuantity > 0 &&
+      item.scheduledDate < disruption.revisedArrivalDate,
+  );
+  const localPurchaseUnits =
+    kind === "protect-target" && delayedMaterial
+      ? Math.max(
+          0,
+          targetMaterialTasks.reduce(
+            (total, item) => total + item.materialQuantity,
+            0,
+          ) - delayedMaterial.available,
+        )
+      : 0;
+  const localPurchaseDate = targetMaterialTasks
+    .map((item) => item.scheduledDate)
+    .sort()[0];
+  const schedule = buildRecoverySchedule(
+    state,
+    kind,
+    targetOrderId,
+    localPurchaseUnits,
+  );
+  const arrivalDates = Object.fromEntries(
+    state.materials.map((item) => [
+      item.id,
+      item.id === disruption.materialId && kind === "expedite"
+        ? disruption.originalArrivalDate
+        : item.scheduledArrival,
+    ]),
+  );
+  const taskDates: Record<string, string> = {};
+  for (const item of state.tasks) {
+    taskDates[item.id] = schedule.taskDates.get(item.id) ?? item.scheduledDate;
+  }
+  const missingTaskDates = state.tasks
+    .filter((item) => !schedule.taskDates.has(item.id))
+    .map((item) => `Task ${item.id} could not be placed in the projected schedule.`);
+  const orderStatuses = Object.fromEntries(
+    state.orders.map((order) => {
+      const orderTasks = state.tasks.filter((item) => item.orderId === order.id);
+      const allComplete =
+        orderTasks.length > 0 && orderTasks.every((item) => item.status === "complete");
+      const hasUnscheduledTask = orderTasks.some((item) => !schedule.taskDates.has(item.id));
+      const finishDate = orderTasks
+        .map((item) => taskDates[item.id])
+        .sort()
+        .at(-1);
+      const late = hasUnscheduledTask || !finishDate || finishDate > order.dueDate;
       return [
         order.id,
-        [
-          startDate,
-          addBusinessDays(startDate, 1),
-          addBusinessDays(startDate, 2),
-        ],
+        allComplete ? "complete" : late ? "late" : "on_track",
       ];
     }),
-  );
+  ) as Record<string, OrderStatus>;
+  const onTimeOrders = Object.values(orderStatuses).filter(
+    (status) => status === "on_track" || status === "complete",
+  ).length;
+  const lateOrderIds = state.orders
+    .filter((order) => orderStatuses[order.id] === "late")
+    .map((order) => order.id);
+  const changedOrderIds = state.orders
+    .filter((order) =>
+      order.taskIds.some((taskId) => taskDates[taskId] !== state.tasks.find((item) => item.id === taskId)?.scheduledDate),
+    )
+    .map((order) => order.id);
+  const changedTaskCount = state.tasks.filter(
+    (item) => taskDates[item.id] !== item.scheduledDate,
+  ).length;
+  const hardViolations = [...schedule.hardViolations, ...missingTaskDates];
+  if (kind === "expedite" && (!delayedMaterial || delayedMaterial.expediteCost <= 0)) {
+    hardViolations.push("Priority freight is not available for the delayed material.");
+  }
+  if (
+    kind === "protect-target" &&
+    localPurchaseUnits > 0 &&
+    !delayedMaterial?.alternateAvailable
+  ) {
+    hardViolations.push("The alternate supplier cannot provide the required local stock.");
+  }
+  if (orderStatuses[targetOrderId] === "late") {
+    hardViolations.push(
+      `Hard target deadline missed: ${targetOrder.customer}'s order finishes after ${targetOrder.dueDate}.`,
+    );
+  }
+  const uniqueHardViolations = [...new Set(hardViolations)];
+  const lateOrders = lateOrderIds.length;
+  const cost =
+    kind === "expedite"
+      ? delayedMaterial?.expediteCost ?? 0
+      : (kind === "protect-target" ? localPurchaseUnits * LOCAL_UNIT_COST : 0) +
+        lateOrders * LATE_ORDER_PENALTY;
+  const projection: RecoveryProjection = {
+    planId,
+    inputFingerprint: recoveryInputFingerprint(state),
+    taskDates,
+    orderStatuses,
+    materialAvailable: Object.fromEntries(
+      state.materials.map((item) => [
+        item.id,
+        item.available +
+          (item.id === disruption.materialId ? localPurchaseUnits : 0),
+      ]),
+    ),
+    materialArrivalDates: arrivalDates,
+    changedOrderIds,
+    onTimeOrders,
+    lateOrders,
+    feasible: uniqueHardViolations.length === 0,
+    hardViolations: uniqueHardViolations,
+    localPurchaseUnits,
+  };
+
+  const targetFinish = targetTasks
+    .map((item) => `${item.name} ${taskDates[item.id]}`)
+    .join(" → ");
+  const scheduleActions = state.orders
+    .filter((order) => order.id === targetOrderId || changedOrderIds.includes(order.id))
+    .map((order) => {
+      const steps = state.tasks
+        .filter((item) => item.orderId === order.id)
+        .sort((a, b) => order.taskIds.indexOf(a.id) - order.taskIds.indexOf(b.id))
+        .map((item) => `${item.name} ${taskDates[item.id]}`)
+        .join(" → ");
+      return `Schedule ${order.id} (${order.customer}): ${steps}. Due ${order.dueDate}; ${orderStatuses[order.id] === "late" ? "late" : "on time"}.`;
+    });
+  const localCostLabel =
+    kind === "protect-target"
+      ? `${localPurchaseUnits} local ${delayedMaterial?.unit === "sheets" ? "sheet" : "unit"}${localPurchaseUnits === 1 ? "" : "s"} × $${LOCAL_UNIT_COST}`
+      : "";
+  const costDetails =
+    kind === "expedite"
+      ? `modeled priority freight $${cost}`
+      : `${localCostLabel ? `${localCostLabel} + ` : ""}${lateOrders} late orders × $${LATE_ORDER_PENALTY}`;
+  const rationale =
+    `${kind === "expedite" ? "Preserve the existing schedule with an expedited arrival." : kind === "protect-target" ? "Protect the selected order with local stock, then schedule remaining exposed work against capacity." : "Make no local purchase; schedule exposed work after the delayed material arrives."} ` +
+    `Projected cost: $${cost} (${costDetails}). ${onTimeOrders} orders finish by their due dates; ${lateOrders} finish late. ` +
+    `The selected order's projected sequence is ${targetFinish || "not scheduled"} (due ${targetOrder.dueDate}). ` +
+    "Recommendation policy: minimize late customer orders first, then modeled cost. Non-target due dates remain visible and carry a modeled $100 late penalty; the selected order's deadline is hard.";
+  const actions = [
+    kind === "expedite"
+      ? `Model priority freight for ${disruption.materialName} at $${delayedMaterial?.expediteCost ?? 0}; no supplier or carrier is contacted.`
+      : kind === "protect-target"
+        ? `Reserve ${localPurchaseUnits} ${delayedMaterial?.unit === "sheets" ? "sheet" : "unit"}${localPurchaseUnits === 1 ? "" : "s"} from ${delayedMaterial?.alternateSupplier ?? "the alternate supplier"} for ${targetOrder.customer}; modeled cost $${localPurchaseUnits * LOCAL_UNIT_COST}.`
+        : `Use the delayed shipment arriving ${disruption.revisedArrivalDate}; make no local purchase.`,
+    ...scheduleActions,
+    `Modeled late-delivery penalty: $${LATE_ORDER_PENALTY} per late order; no overtime surcharge is included because the scenario has no overtime price.`,
+    ...(uniqueHardViolations.length
+      ? uniqueHardViolations.map((item) => `Constraint failure: ${item}`)
+      : []),
+  ];
+  const risks = [
+    ...(lateOrderIds.length
+      ? [`${lateOrderIds.length} orders are forecast late: ${lateOrderIds.join(", ")}.`]
+      : []),
+    ...(kind === "protect-target" && localPurchaseUnits > 0
+      ? ["Local supplier availability and the $110-per-sheet estimate are simulated assumptions, not a quote or purchase."]
+      : []),
+    ...(kind === "expedite"
+      ? ["The expedited arrival date and freight estimate are simulated, not a carrier commitment."]
+      : []),
+    ...uniqueHardViolations,
+  ];
+  return {
+    projection,
+    cost,
+    changedTaskCount,
+    lateOrderIds,
+    rationale,
+    actions,
+    risks,
+  };
 }
 
 export function simulateDisruption(
@@ -481,16 +1056,44 @@ export function analyzeImpact(state: PersistedShopState): ImpactAnalysis {
     throw new DomainError("Simulate a supplier disruption before analyzing impact.", 409);
   }
 
-  const seedTaskIds = new Set(
-    state.tasks
-      .filter(
-        (item) =>
-          item.materialId === disruption.materialId &&
-          item.materialQuantity > 0 &&
-          item.scheduledDate < disruption.revisedArrivalDate,
-      )
-      .map((item) => item.id),
+  const delayedMaterial = state.materials.find(
+    (item) => item.id === disruption.materialId,
   );
+  if (!delayedMaterial) {
+    throw new DomainError(
+      `Material '${disruption.materialId}' was not found.`,
+      404,
+    );
+  }
+  let remainingStock = delayedMaterial.available;
+  let inboundReceived = false;
+  const seedTaskIds = new Set<string>();
+  const materialTasks = state.tasks
+    .filter(
+      (item) =>
+        item.materialId === disruption.materialId &&
+        item.materialQuantity > 0 &&
+        item.status !== "complete",
+    )
+    .sort(
+      (a, b) =>
+        a.scheduledDate.localeCompare(b.scheduledDate) ||
+        compareTaskPriority(state, a, b),
+    );
+  for (const item of materialTasks) {
+    if (
+      !inboundReceived &&
+      item.scheduledDate >= delayedMaterial.scheduledArrival
+    ) {
+      remainingStock += delayedMaterial.delayedShipment;
+      inboundReceived = true;
+    }
+    if (item.materialQuantity <= remainingStock) {
+      remainingStock -= item.materialQuantity;
+    } else {
+      seedTaskIds.add(item.id);
+    }
+  }
   const affectedTaskIds = new Set(seedTaskIds);
 
   let changed = true;
@@ -585,11 +1188,7 @@ export function proposeRecovery(
   if (!targetOrder) throw new DomainError(`Order '${targetOrderId}' was not found.`, 404);
 
   const impact = analyzeImpact(state);
-  const affectedOrderIds = impact.affectedOrderIds;
-  const impactedOrders = state.orders.filter((order) =>
-    affectedOrderIds.includes(order.id),
-  );
-  if (!affectedOrderIds.includes(targetOrderId)) {
+  if (!impact.affectedOrderIds.includes(targetOrderId)) {
     throw new DomainError(
       `Order '${targetOrderId}' is not exposed to the active material delay.`,
       400,
@@ -599,113 +1198,79 @@ export function proposeRecovery(
     key === "protect-target"
       ? `${state.disruption!.id}-${targetOrderId}-${key}`
       : `${state.disruption!.id}-${key}`;
-  const allOrderCount = state.orders.length;
-  const alternate = state.materials.find(
-    (material) => material.id === state.disruption!.materialId,
-  );
-  const requiredTargetUnits = state.tasks
-    .filter(
-      (task) =>
-        task.orderId === targetOrderId &&
-        task.materialId === state.disruption!.materialId,
-    )
-    .reduce((total, task) => total + task.materialQuantity, 0);
-  const localBuyUnits = Math.max(
-    0,
-    requiredTargetUnits - (alternate?.available ?? 0),
-  );
-  const targetUnit = alternate?.unit === "sheets" ? "sheet" : "unit";
-  const targetUnits = `${targetUnit}${localBuyUnits === 1 ? "" : "s"}`;
-  const protectionSchedule = targetProtectionSchedule(state, targetOrderId);
-  const displacedOrderIds = [...protectionSchedule.entries()]
-    .filter(([orderId, dates]) => {
-      const order = state.orders.find((item) => item.id === orderId);
-      return order !== undefined && (dates.at(-1) ?? "") > order.dueDate;
-    })
-    .map(([orderId]) => orderId);
-  const latePenaltyPerOrder = 100;
-  const projectedLateOrders = state.orders.filter((order) =>
-    displacedOrderIds.includes(order.id),
-  );
-  const penaltyLabel =
-    projectedLateOrders.length === 1 ? "late-delivery penalty" : "late-delivery penalties";
-  const protectionCost =
-    localBuyUnits * 110 +
-    60 +
-    projectedLateOrders.length * latePenaltyPerOrder;
-  const recoveryPlans: RecoveryPlan[] = [
+  const planSpecs: Array<{
+    key: RecoveryKind;
+    name: string;
+    strategy: string;
+  }> = [
     {
-      id: planId("expedite"),
+      key: "expedite",
       name: "Expedite the full shipment",
-      strategy: "Pay for priority freight and preserve the existing sequence",
-      targetOrderId,
-      feasible: Boolean(alternate && alternate.expediteCost > 0),
-      cost: alternate?.expediteCost ?? 0,
-      onTimeOrders: allOrderCount,
-      lateOrders: 0,
-      affectedOrders: affectedOrderIds,
-      risks: [
-        "Expedited arrival date is a simulation estimate, not a carrier commitment.",
-        "No real supplier or carrier is contacted.",
-      ],
-      rationale: `Restores arrival to ${state.disruption.originalArrivalDate}; existing machine slots remain intact. All ${allOrderCount} orders stay on time.`,
-      actions: [
-        `Simulate priority freight for ${state.disruption.materialName}: $${alternate?.expediteCost ?? 0}.`,
-        "Keep the current task sequence and reserved machine time.",
-      ],
-      status: "proposed",
+      strategy: "Model priority freight and preserve current task dates.",
     },
     {
-      id: planId("protect-target"),
+      key: "protect-target",
       name: `Protect ${targetOrder.customer} with a partial local buy`,
-      strategy: `Reserve ${localBuyUnits} local ${targetUnits} for the target and re-sequence the remaining work`,
-      feasible: Boolean(alternate?.alternateAvailable),
-      targetOrderId,
-      cost: protectionCost,
-      onTimeOrders: Math.max(0, allOrderCount - projectedLateOrders.length),
-      lateOrders: projectedLateOrders.length,
-      affectedOrders: displacedOrderIds,
-      risks: [
-        `${projectedLateOrders.length} orders are forecast late after re-sequencing.`,
-        "Local stock, capacity, and delivery dates are simulated estimates; confirm stock grade and shift capacity in a real shop.",
-      ],
-      rationale:
-        `Estimated total $${protectionCost}: $${localBuyUnits * 110} for ${localBuyUnits} local ${targetUnits}, $60 overtime/rescheduling, and $${projectedLateOrders.length * latePenaltyPerOrder} in modeled late penalties. The target stays on track; ${projectedLateOrders.length} other orders miss their due dates.`,
-      actions: [
-        `Reserve ${localBuyUnits} ${targetUnits} from ${alternate?.alternateSupplier ?? "the local market"} for ${targetOrder.customer}: $${localBuyUnits * 110}.`,
-        `Re-sequence ${protectionSchedule.size} exposed customer orders around the revised ${state.disruption.revisedArrivalDate} arrival; modeled overtime: $60.`,
-        `Record ${projectedLateOrders.length} modeled ${penaltyLabel} at $${latePenaltyPerOrder} each: $${projectedLateOrders.length * latePenaltyPerOrder}.`,
-      ],
-      status: "proposed",
+      strategy: "Reserve local stock for the selected order and re-sequence other exposed work.",
     },
     {
-      id: planId("wait"),
+      key: "wait",
       name: "Wait for the delayed shipment",
-      strategy: "Make no sourcing or schedule changes",
-      targetOrderId,
-      feasible: false,
-      cost: impactedOrders.length * latePenaltyPerOrder,
-      onTimeOrders: Math.max(0, allOrderCount - impactedOrders.length),
-      lateOrders: Math.min(impactedOrders.length, allOrderCount),
-      affectedOrders: affectedOrderIds,
-      risks: [
-        `${targetOrder.customer}'s order cannot complete its dependent production steps by ${targetOrder.dueDate}.`,
-        `Late-penalty estimate uses $${latePenaltyPerOrder} per affected order.`,
-      ],
-      rationale: `Infeasible for the selected commitment: material is not available until ${state.disruption.revisedArrivalDate}, after the first dependent production slot. Modeled exposure is $${impactedOrders.length * latePenaltyPerOrder} in late penalties.`,
-      actions: [
-        `Accept revised arrival on ${state.disruption.revisedArrivalDate}.`,
-        "Do not change the simulated production schedule.",
-      ],
-      status: "proposed",
+      strategy: "Make no local purchase and schedule exposed work after the shipment arrives.",
     },
   ];
+  const evaluations = planSpecs.map((spec) => ({
+    ...spec,
+    id: planId(spec.key),
+    evaluation: evaluateRecoveryPlan(
+      state,
+      planId(spec.key),
+      targetOrderId,
+      spec.key,
+    ),
+  }));
+  const recommended = [...evaluations]
+    .filter((item) => item.evaluation.projection.feasible)
+    .sort(
+      (a, b) =>
+        a.evaluation.projection.lateOrders - b.evaluation.projection.lateOrders ||
+        a.evaluation.cost - b.evaluation.cost ||
+        a.evaluation.changedTaskCount - b.evaluation.changedTaskCount ||
+        a.id.localeCompare(b.id),
+    )[0];
+  const recoveryPlans: RecoveryPlan[] = evaluations.map((item) => ({
+    id: item.id,
+    name: item.name,
+    strategy: item.strategy,
+    targetOrderId,
+    feasible: item.evaluation.projection.feasible,
+    cost: item.evaluation.cost,
+    onTimeOrders: item.evaluation.projection.onTimeOrders,
+    lateOrders: item.evaluation.projection.lateOrders,
+    affectedOrders: item.evaluation.projection.changedOrderIds,
+    risks: item.evaluation.risks,
+    rationale:
+      item.id === recommended?.id
+        ? `Recommended by policy (fewer late customers first, then modeled cost). ${item.evaluation.rationale}`
+        : item.evaluation.rationale,
+    actions: item.evaluation.actions,
+    status: "proposed",
+  }));
 
   const existing = new Map(state.plans.map((plan) => [plan.id, plan]));
-  const plans = recoveryPlans.map((plan) => existing.get(plan.id) ?? plan);
+  const plans = recoveryPlans.map((plan) => {
+    const prior = existing.get(plan.id);
+    return prior ? { ...plan, status: prior.status } : plan;
+  });
   if (recoveryPlans.every((plan) => existing.has(plan.id))) {
     return { state, plans };
   }
+  const projections = {
+    ...(state.recoveryProjections ?? {}),
+    ...Object.fromEntries(
+      evaluations.map((item) => [item.id, item.evaluation.projection]),
+    ),
+  };
   let next: PersistedShopState = {
     ...state,
     plans: [
@@ -714,6 +1279,7 @@ export function proposeRecovery(
       ),
       ...plans,
     ],
+    recoveryProjections: projections,
   };
   next = addAction(
     next,
@@ -736,6 +1302,21 @@ export function approveRecovery(
   if (!plan.feasible) throw new DomainError("This plan is infeasible and cannot be approved.");
   if (plan.status === "executed" || plan.status === "verified") return state;
   if (plan.status === "approved") return state;
+  const projection = state.recoveryProjections?.[planId];
+  if (
+    !projection ||
+    projection.inputFingerprint !== recoveryInputFingerprint(state)
+  ) {
+    throw new DomainError(
+      "This plan has no current constraint-checked projection. Generate recovery plans again before approval.",
+      409,
+    );
+  }
+  if (!projection.feasible) {
+    throw new DomainError(
+      "This plan violates a hard scheduling constraint and cannot be approved.",
+    );
+  }
 
   const next: PersistedShopState = {
     ...state,
@@ -763,13 +1344,8 @@ export function executeRecovery(
   const plan = state.plans.find((item) => item.id === planId);
   if (!plan) throw new DomainError(`Recovery plan '${planId}' was not found.`, 404);
 
-  if (
-    plan.status === "executed" ||
-    plan.status === "verified" ||
-    state.executedRequestIds.includes(requestId)
-  ) {
-    return state;
-  }
+  if (state.executedRequestIds.includes(requestId)) return state;
+  if (plan.status === "executed" || plan.status === "verified") return state;
   if (plan.status !== "approved") {
     throw new DomainError("Approval is required before a recovery plan can execute.");
   }
@@ -789,57 +1365,51 @@ export function executeRecovery(
     );
   }
 
-  const isTargetProtection = plan.id.endsWith("-protect-target");
-  const protectionSchedule = isTargetProtection
-    ? targetProtectionSchedule(state, plan.targetOrderId)
-    : new Map<string, string[]>();
-  const targetOrderDemand = isTargetProtection
-    ? state.tasks
-        .filter(
-          (task) =>
-            task.orderId === plan.targetOrderId &&
-            task.materialId === state.disruption?.materialId,
-        )
-        .reduce((total, task) => total + task.materialQuantity, 0)
-    : 0;
+  const projection = state.recoveryProjections?.[planId];
+  if (
+    !projection ||
+    projection.inputFingerprint !== recoveryInputFingerprint(state)
+  ) {
+    throw new DomainError(
+      "The approved plan is stale or missing its projected schedule. Generate and approve a current plan before execution.",
+      409,
+    );
+  }
+  if (!projection.feasible || !plan.feasible) {
+    throw new DomainError(
+      "The approved plan violates a hard scheduling constraint and cannot execute.",
+      409,
+    );
+  }
+  if (
+    state.tasks.some((task) => !projection.taskDates[task.id]) ||
+    state.orders.some((order) => !projection.orderStatuses[order.id]) ||
+    state.materials.some(
+      (material) =>
+        projection.materialAvailable[material.id] === undefined ||
+        projection.materialArrivalDates[material.id] === undefined,
+    )
+  ) {
+    throw new DomainError(
+      "The approved plan is incomplete and cannot be executed.",
+      409,
+    );
+  }
 
   let next: PersistedShopState = {
     ...state,
     materials: state.materials.map((material) => {
-      if (material.id !== state.disruption?.materialId) return material;
-      if (plan.id.endsWith("-expedite")) {
-        return {
-          ...material,
-          scheduledArrival: state.disruption.originalArrivalDate,
-        };
-      }
       return {
         ...material,
-        available:
-          material.available +
-          Math.max(0, targetOrderDemand - material.available),
+        available: projection.materialAvailable[material.id],
+        scheduledArrival: projection.materialArrivalDates[material.id],
       };
     }),
     tasks: state.tasks.map((task) => {
-      const orderDates = protectionSchedule.get(task.orderId);
-      if (!orderDates) return task;
-      const order = state.orders.find((item) => item.id === task.orderId);
-      const taskIndex = order?.taskIds.indexOf(task.id) ?? -1;
-      const scheduledDate = orderDates[taskIndex];
-      return scheduledDate ? { ...task, scheduledDate } : task;
+      return { ...task, scheduledDate: projection.taskDates[task.id] };
     }),
     orders: state.orders.map((order) => {
-      if (plan.id.endsWith("-expedite")) {
-        return { ...order, status: "on_track" };
-      }
-      if (plan.id.endsWith("-protect-target")) {
-        return {
-          ...order,
-          status: plan.affectedOrders.includes(order.id) ? "late" : "on_track",
-        };
-      }
-      const impacted = plan.affectedOrders.includes(order.id);
-      return impacted ? { ...order, status: "late" } : order;
+      return { ...order, status: projection.orderStatuses[order.id] };
     }),
     plans: state.plans.map((item) => {
       if (item.id === planId) return { ...item, status: "executed" };
@@ -871,26 +1441,187 @@ export function verifyRecovery(
   if (plan.status !== "executed" && plan.status !== "verified") {
     throw new DomainError("Execute an approved recovery plan before verification.");
   }
-
-  const onTimeOrders = state.orders.filter(
-    (order) => order.status === "on_track" || order.status === "complete",
+  const projection = state.recoveryProjections?.[planId];
+  const actualTaskDates = new Map(
+    state.tasks.map((item) => [item.id, item.scheduledDate]),
+  );
+  const actualArrivalDates = Object.fromEntries(
+    state.materials.map((item) => [item.id, item.scheduledArrival]),
+  );
+  const actualOrderStatuses = Object.fromEntries(
+    state.orders.map((order) => {
+      const orderTasks = state.tasks.filter((item) => item.orderId === order.id);
+      const allComplete =
+        orderTasks.length > 0 && orderTasks.every((item) => item.status === "complete");
+      const finishDate = orderTasks
+        .map((item) => item.scheduledDate)
+        .sort()
+        .at(-1);
+      return [
+        order.id,
+        allComplete
+          ? "complete"
+          : !finishDate || finishDate > order.dueDate
+            ? "late"
+            : "on_track",
+      ];
+    }),
+  ) as Record<string, OrderStatus>;
+  const onTimeOrders = Object.values(actualOrderStatuses).filter(
+    (status) => status === "on_track" || status === "complete",
   ).length;
-  const lateOrders = state.orders.filter((order) => order.status === "late").length;
+  const lateOrders = Object.values(actualOrderStatuses).filter(
+    (status) => status === "late",
+  ).length;
+  const machineViolations = machineScheduleViolations(state, actualTaskDates);
+  const dependencyViolations = dependencyScheduleViolations(
+    state,
+    actualTaskDates,
+  );
+  const materialViolations = materialScheduleViolations(
+    state,
+    actualTaskDates,
+    actualArrivalDates,
+    0,
+    undefined,
+  );
+  const unknownMaterials = state.tasks
+    .filter(
+      (item) =>
+        item.materialQuantity > 0 &&
+        !state.materials.some((material) => material.id === item.materialId),
+    )
+    .map((item) => `Task ${item.id} uses missing material ${item.materialId}.`);
+  const constraintViolations = [
+    ...machineViolations,
+    ...dependencyViolations,
+    ...materialViolations,
+    ...unknownMaterials,
+  ];
+  const scheduleMatches =
+    Boolean(projection) &&
+    state.tasks.every(
+      (item) => projection?.taskDates[item.id] === item.scheduledDate,
+    );
+  const orderOutcomesMatch =
+    Boolean(projection) &&
+    state.orders.every(
+      (order) =>
+        projection?.orderStatuses[order.id] === actualOrderStatuses[order.id] &&
+        order.status === actualOrderStatuses[order.id],
+    );
+  const materialOutcomesMatch =
+    Boolean(projection) &&
+    state.materials.every(
+      (material) =>
+        projection?.materialAvailable[material.id] === material.available &&
+        projection?.materialArrivalDates[material.id] ===
+          material.scheduledArrival,
+    );
+  const planForecastMatches =
+    Boolean(projection) &&
+    projection?.feasible === plan.feasible &&
+    projection?.onTimeOrders === plan.onTimeOrders &&
+    projection?.lateOrders === plan.lateOrders &&
+    projection?.changedOrderIds.length === plan.affectedOrders.length &&
+    [...(projection?.changedOrderIds ?? [])].sort().join(",") ===
+      [...plan.affectedOrders].sort().join(",");
   const stateMatches =
-    onTimeOrders === plan.onTimeOrders && lateOrders === plan.lateOrders;
+    Boolean(projection?.feasible) &&
+    scheduleMatches &&
+    orderOutcomesMatch &&
+    materialOutcomesMatch &&
+    planForecastMatches &&
+    onTimeOrders === plan.onTimeOrders &&
+    lateOrders === plan.lateOrders &&
+    constraintViolations.length === 0;
+  const issues = [
+    ...constraintViolations,
+    ...(!projection
+      ? ["No persisted forecast exists for this plan; its exact predicted schedule cannot be compared."]
+      : []),
+    ...(projection && !scheduleMatches
+      ? ["Persisted task dates differ from the plan's predicted schedule."]
+      : []),
+    ...(projection && !orderOutcomesMatch
+      ? ["Persisted order outcomes differ from the dates or predicted order statuses."]
+      : []),
+    ...(projection && !materialOutcomesMatch
+      ? ["Persisted material quantities or arrival dates differ from the plan forecast."]
+      : []),
+    ...(projection && !planForecastMatches
+      ? ["The saved plan summary differs from its stored schedule projection."]
+      : []),
+    ...(onTimeOrders !== plan.onTimeOrders || lateOrders !== plan.lateOrders
+      ? ["Actual on-time/late counts differ from the plan forecast."]
+      : []),
+  ];
 
-  if (plan.status === "verified") {
+  if (plan.status === "verified" && stateMatches) {
     return {
       state,
       result: {
-        verified: stateMatches,
-        message: stateMatches
-          ? "Verified: the simulated order statuses match the approved recovery plan."
-          : "Verification failed: the current order statuses differ from the plan.",
+        verified: true,
+        message: "Verified: the persisted schedule, material, capacity, dependencies, deadlines, and plan forecast agree.",
         planId,
         onTimeOrders,
         lateOrders,
-        stateMatches,
+        stateMatches: true,
+      },
+    };
+  }
+  if (plan.status === "verified" && !projection) {
+    return {
+      state,
+      result: {
+        verified: false,
+        message: "This legacy verified plan has no stored forecast snapshot, so exact predicted-schedule verification is unavailable.",
+        planId,
+        onTimeOrders,
+        lateOrders,
+        stateMatches: false,
+      },
+    };
+  }
+  if (!stateMatches && plan.status === "verified") {
+    return {
+      state,
+      result: {
+        verified: false,
+        message: `Verification failed: ${issues.slice(0, 3).join(" ")}`,
+        planId,
+        onTimeOrders,
+        lateOrders,
+        stateMatches: false,
+      },
+    };
+  }
+
+  if (!stateMatches) {
+    const description = `Verification failed for ${planId}: ${issues.slice(0, 3).join(" ") || "stored state does not match the projected outcome."}`;
+    const priorFailure = state.actionHistory.at(-1);
+    const next =
+      priorFailure?.action === "recovery_verification_failed" &&
+      priorFailure.planId === planId &&
+      priorFailure.description === description
+        ? state
+        : addAction(
+            state,
+            "recovery_verification_failed",
+            description,
+            planId,
+            "mismatch",
+            now,
+          );
+    return {
+      state: next,
+      result: {
+        verified: false,
+        message: description,
+        planId,
+        onTimeOrders,
+        lateOrders,
+        stateMatches: false,
       },
     };
   }
@@ -904,30 +1635,30 @@ export function verifyRecovery(
   next = addAction(
     next,
     "recovery_verified",
-    stateMatches
-      ? `Verified ${onTimeOrders} on-time and ${lateOrders} late orders against plan ${planId}.`
-      : `Verification found a mismatch for plan ${planId}.`,
+    `Verified ${onTimeOrders} on-time and ${lateOrders} late orders against the exact projected schedule for ${planId}.`,
     planId,
-    stateMatches ? "verified" : "mismatch",
+    "verified",
     now,
   );
   return {
     state: next,
     result: {
-      verified: stateMatches,
-      message: stateMatches
-        ? "Verified: the simulated order statuses match the approved recovery plan."
-        : "Verification failed: the current order statuses differ from the plan.",
+      verified: true,
+      message: "Verified: the persisted schedule, material, capacity, dependencies, deadlines, and plan forecast agree.",
       planId,
       onTimeOrders,
       lateOrders,
-      stateMatches,
+      stateMatches: true,
     },
   };
 }
 
 export function getShopView(state: PersistedShopState): ShopState {
-  const { actionHistory: _actionHistory, executedRequestIds: _executedRequestIds, ...view } =
-    state;
+  const {
+    actionHistory: _actionHistory,
+    executedRequestIds: _executedRequestIds,
+    recoveryProjections: _recoveryProjections,
+    ...view
+  } = state;
   return view;
 }
