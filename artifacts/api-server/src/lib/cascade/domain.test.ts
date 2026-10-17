@@ -204,7 +204,9 @@ test("recovery alternatives are ranked from the computed schedule and explicit t
     ),
   );
   assert.equal(plans[2]?.feasible, false);
-  assert.match(plans[2]?.rationale ?? "", /Hard target deadline missed/);
+  assert.ok(
+    plans[2]?.risks.some((risk) => risk.includes("Hard target deadline missed")),
+  );
   assert.equal(
     Object.keys(state.recoveryProjections).length,
     3,
@@ -229,6 +231,58 @@ test("plan proposal is idempotent and invalid order IDs fail explicitly", () => 
   assert.throws(
     () => proposeRecovery(disrupted, "LEE-043", fixedNow),
     /not exposed to the active material delay/,
+  );
+});
+
+test("material shortages make every recovery plan infeasible", () => {
+  const { disrupted } = disruptedScenario();
+  const noInboundStock = {
+    ...disrupted,
+    materials: disrupted.materials.map((material) =>
+      material.id === "plywood"
+        ? { ...material, delayedShipment: 0, alternateAvailable: false }
+        : material,
+    ),
+  };
+
+  const { plans } = proposeRecovery(noInboundStock, "PAL-204", fixedNow);
+  assert.ok(plans.every((plan) => !plan.feasible));
+  assert.ok(
+    plans.some((plan) => plan.risks.some((risk) => risk.includes("Material shortage"))),
+  );
+});
+
+test("machine capacity conflicts make every recovery plan infeasible", () => {
+  const { disrupted } = disruptedScenario();
+  const constrained = {
+    ...disrupted,
+    machines: disrupted.machines.map((machine) =>
+      machine.id === "panel-saw" ? { ...machine, hoursPerDay: 1 } : machine,
+    ),
+  };
+
+  const { plans } = proposeRecovery(constrained, "PAL-204", fixedNow);
+  assert.ok(plans.every((plan) => !plan.feasible));
+  assert.ok(
+    plans.some((plan) => plan.risks.some((risk) => risk.includes("daily capacity"))),
+  );
+});
+
+test("missing task dependencies make every recovery plan infeasible", () => {
+  const { disrupted } = disruptedScenario();
+  const invalidDependencies = {
+    ...disrupted,
+    tasks: disrupted.tasks.map((item) =>
+      item.id === "pal-assemble"
+        ? { ...item, dependsOn: [...item.dependsOn, "missing-task"] }
+        : item,
+    ),
+  };
+
+  const { plans } = proposeRecovery(invalidDependencies, "PAL-204", fixedNow);
+  assert.ok(plans.every((plan) => !plan.feasible));
+  assert.ok(
+    plans.some((plan) => plan.risks.some((risk) => risk.includes("missing task"))),
   );
 });
 
@@ -276,6 +330,47 @@ test("execution requires approval, is idempotent, and verification matches persi
   );
 });
 
+test("verification independently rejects a persisted miss of the selected hard deadline", () => {
+  const { disrupted } = disruptedScenario();
+  const { state: proposedState, plans } = proposeRecovery(disrupted, "PAL-204", fixedNow);
+  const plan = plans[0]!;
+  const approved = approveRecovery(proposedState, plan.id, fixedNow);
+  const executed = executeRecovery(approved, plan.id, "request-deadline-drift", fixedNow);
+  const projection = executed.recoveryProjections[plan.id]!;
+  const taskDates = { ...projection.taskDates, "pal-finish": "2026-10-22" };
+  const orderStatuses = { ...projection.orderStatuses, "PAL-204": "late" as const };
+  const alteredProjection = {
+    ...projection,
+    taskDates,
+    orderStatuses,
+    changedOrderIds: ["PAL-204"],
+    onTimeOrders: 7,
+    lateOrders: 1,
+  };
+  const driftedState = {
+    ...executed,
+    tasks: executed.tasks.map((item) =>
+      item.id === "pal-finish" ? { ...item, scheduledDate: "2026-10-22" } : item,
+    ),
+    orders: executed.orders.map((order) =>
+      order.id === "PAL-204" ? { ...order, status: "late" as const } : order,
+    ),
+    plans: executed.plans.map((item) =>
+      item.id === plan.id
+        ? { ...item, affectedOrders: ["PAL-204"], onTimeOrders: 7, lateOrders: 1 }
+        : item,
+    ),
+    recoveryProjections: {
+      ...executed.recoveryProjections,
+      [plan.id]: alteredProjection,
+    },
+  };
+
+  const verification = verifyRecovery(driftedState, plan.id, fixedNow);
+  assert.equal(verification.result.verified, false);
+  assert.match(verification.result.message, /Hard target deadline missed/);
+});
+
 test("target-protection plan records the modeled late order and verifies honestly", () => {
   const { disrupted } = disruptedScenario();
   const { state: proposedState, plans } = proposeRecovery(disrupted, "PAL-204", fixedNow);
@@ -285,8 +380,8 @@ test("target-protection plan records the modeled late order and verifies honestl
   const verification = verifyRecovery(executed, plan.id, fixedNow);
 
   assert.equal(verification.result.verified, true);
-  assert.equal(verification.result.onTimeOrders, 5);
-  assert.equal(verification.result.lateOrders, 3);
+  assert.equal(verification.result.onTimeOrders, 6);
+  assert.equal(verification.result.lateOrders, 2);
   assert.equal(
     verification.state.orders.find((order) => order.id === "PAL-204")?.status,
     "on_track",
@@ -301,7 +396,7 @@ test("target-protection plan records the modeled late order and verifies honestl
   );
   assert.equal(
     verification.state.orders.find((order) => order.id === "NG-007")?.status,
-    "late",
+    "on_track",
   );
   assert.equal(
     verification.state.orders.find((order) => order.id === "RIV-052")?.status,
@@ -321,7 +416,7 @@ test("target-protection plan records the modeled late order and verifies honestl
   );
   assert.equal(
     verification.state.tasks.find((task) => task.id === "riv-finish")?.scheduledDate,
-    "2026-10-21",
+    "2026-10-20",
   );
 });
 
@@ -330,7 +425,10 @@ test("partial local buy reserves enough stock for the chosen order", () => {
   const { state: proposedState, plans } = proposeRecovery(disrupted, "BRK-118", fixedNow);
   const plan = plans.find((item) => item.id.endsWith("-protect-target"))!;
   assert.equal(plan.targetOrderId, "BRK-118");
-  assert.equal(plan.actions[0], "Reserve 2 sheets from Summit Materials for Brookside: $220.");
+  assert.equal(
+    plan.actions[0],
+    "Reserve 2 sheets from Summit Materials for Brookside; modeled cost $220.",
+  );
 
   const approved = approveRecovery(proposedState, plan.id, fixedNow);
   const executed = executeRecovery(approved, plan.id, "request-brookside", fixedNow);

@@ -1492,11 +1492,18 @@ export function verifyRecovery(
         !state.materials.some((material) => material.id === item.materialId),
     )
     .map((item) => `Task ${item.id} uses missing material ${item.materialId}.`);
+  const targetOrder = state.orders.find((order) => order.id === plan.targetOrderId);
+  const targetDeadlineViolations = !targetOrder
+    ? [`Selected target order ${plan.targetOrderId} is missing.`]
+    : actualOrderStatuses[targetOrder.id] === "late"
+      ? [`Hard target deadline missed: ${targetOrder.customer}'s order finishes after ${targetOrder.dueDate}.`]
+      : [];
   const constraintViolations = [
     ...machineViolations,
     ...dependencyViolations,
     ...materialViolations,
     ...unknownMaterials,
+    ...targetDeadlineViolations,
   ];
   const scheduleMatches =
     Boolean(projection) &&

@@ -32,41 +32,41 @@
 }
 
 :root {
-  --background: 42 28% 95%;
-  --foreground: 207 24% 17%;
-  --border: 39 17% 84%;
-  --input: 39 17% 84%;
-  --ring: 169 54% 34%;
-  --card: 42 32% 98%;
-  --card-foreground: 207 24% 17%;
-  --primary: 169 54% 29%;
-  --primary-foreground: 42 32% 98%;
-  --secondary: 38 24% 90%;
-  --secondary-foreground: 207 24% 20%;
-  --muted: 40 20% 91%;
-  --muted-foreground: 205 10% 46%;
-  --accent: 35 77% 57%;
-  --accent-foreground: 207 24% 17%;
+  --background: 214 22% 96%;
+  --foreground: 216 25% 17%;
+  --border: 214 17% 84%;
+  --input: 214 17% 84%;
+  --ring: 172 64% 31%;
+  --card: 0 0% 100%;
+  --card-foreground: 216 25% 17%;
+  --primary: 172 64% 28%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 214 16% 91%;
+  --secondary-foreground: 216 23% 20%;
+  --muted: 214 17% 93%;
+  --muted-foreground: 215 10% 44%;
+  --accent: 27 84% 53%;
+  --accent-foreground: 216 25% 17%;
   --destructive: 3 62% 48%;
   --destructive-foreground: 0 0% 100%;
   --popover: 42 32% 98%;
   --popover-foreground: 207 24% 17%;
-  --sidebar: 207 27% 19%;
-  --sidebar-foreground: 40 22% 91%;
-  --sidebar-border: 207 20% 29%;
-  --sidebar-primary: 169 54% 48%;
-  --sidebar-primary-foreground: 207 27% 14%;
-  --sidebar-accent: 207 22% 26%;
-  --sidebar-accent-foreground: 40 22% 96%;
-  --chart-1: 169 54% 38%;
-  --chart-2: 35 77% 57%;
-  --chart-3: 205 29% 46%;
+  --sidebar: 216 29% 16%;
+  --sidebar-foreground: 210 22% 94%;
+  --sidebar-border: 216 21% 27%;
+  --sidebar-primary: 172 64% 52%;
+  --sidebar-primary-foreground: 216 29% 13%;
+  --sidebar-accent: 216 23% 24%;
+  --sidebar-accent-foreground: 210 22% 96%;
+  --chart-1: 172 64% 34%;
+  --chart-2: 27 84% 53%;
+  --chart-3: 207 25% 45%;
   --chart-4: 3 62% 48%;
-  --chart-5: 43 52% 67%;
+  --chart-5: 46 78% 52%;
   --app-font-sans: 'DM Sans', sans-serif;
   --app-font-mono: 'DM Mono', monospace;
   --radius: 0.55rem;
-  --shadow-sm: 0 2px 8px hsl(207 24% 17% / 0.06);
+  --shadow-sm: 0 2px 8px hsl(216 25% 17% / 0.05);
 }
 
 .dark {
@@ -104,9 +104,9 @@
 
 .mono { font-family: var(--app-font-mono); }
 .display { font-family: 'Space Grotesk', sans-serif; }
-.panel { background: hsl(var(--card)); border: 1px solid hsl(var(--border)); border-radius: 10px; box-shadow: var(--shadow-sm); animation: panel-arrive .42s both; }
-.eyebrow { font-family: var(--app-font-mono); font-size: 10px; letter-spacing: .11em; text-transform: uppercase; color: hsl(var(--muted-foreground)); }
-.status-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 4px; font: 500 10px var(--app-font-mono); letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
+.panel { background: hsl(var(--card)); border: 1px solid hsl(var(--border)); border-radius: 8px; box-shadow: var(--shadow-sm); animation: panel-arrive .42s both; }
+.eyebrow { font-family: var(--app-font-mono); font-size: 10px; text-transform: uppercase; color: hsl(var(--muted-foreground)); }
+.status-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 4px; font: 500 10px var(--app-font-mono); text-transform: uppercase; white-space: nowrap; }
 .status-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .scrollbar-thin { scrollbar-width: thin; scrollbar-color: hsl(var(--border)) transparent; }
 .skeleton { background: linear-gradient(90deg, hsl(var(--muted)) 25%, hsl(var(--secondary)) 50%, hsl(var(--muted)) 75%); background-size: 200% 100%; animation: skeleton 1.5s ease-in-out infinite; border-radius: 5px; }

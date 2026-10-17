@@ -81,6 +81,7 @@ function Home() {
   const [notice, setNotice] = useState('');
   const [voiceListening, setVoiceListening] = useState(false);
   const analyzedDisruptionId = useRef('');
+  const restoredVerificationPlanId = useRef('');
 
   const state = shop.data;
   const orders = state?.orders ?? [];
@@ -89,7 +90,10 @@ function Home() {
   const machines = state?.machines ?? [];
   const events = (history.data ?? []) as ActionEvent[];
   const selectedMaterialId = materialId || materials.find((material) => material.name.toLowerCase().includes('plywood'))?.id || materials[0]?.id || '';
+  const activeDisruption = impact?.disruption ?? state?.disruption ?? null;
   const activePlan = alternatives.find((plan) => plan.id === activePlanId) ?? state?.plans.find((plan) => plan.id === activePlanId) ?? null;
+  const selectedPlanChanges = activePlan ? tasks.filter((task) => activePlan.affectedOrders.includes(task.orderId)) : [];
+  const recoveredMaterial = materials.find((material) => material.id === activeDisruption?.materialId);
   const selectedMaterial = materials.find((material) => material.id === selectedMaterialId);
   const anyPending = simulateMutation.isPending || analyzeMutation.isPending || proposeMutation.isPending ||
     approveMutation.isPending || executeMutation.isPending || verifyMutation.isPending;
@@ -127,6 +131,15 @@ function Home() {
     if (preferred) setActivePlanId(preferred.id);
   }, [state?.plans, alternatives, activePlanId]);
 
+  useEffect(() => {
+    const verifiedPlan = state?.plans.find((plan) => plan.status === 'verified');
+    if (!verifiedPlan || verification?.planId === verifiedPlan.id || restoredVerificationPlanId.current === verifiedPlan.id) return;
+    restoredVerificationPlanId.current = verifiedPlan.id;
+    verifyMutation.mutate({ planId: verifiedPlan.id }, {
+      onSuccess: (result) => setVerification(result),
+    });
+  }, [state?.plans, verification?.planId]);
+
   const runSimulation = () => {
     if (!selectedMaterialId) return;
     setNotice('');
@@ -151,7 +164,7 @@ function Home() {
     proposeMutation.mutate({ data: { targetOrderId: orderId } }, {
       onSuccess: (plans) => {
         setAlternatives(plans);
-        setActivePlanId(plans[0]?.id ?? '');
+        setActivePlanId(plans.find((plan) => plan.rationale.startsWith('Recommended by policy'))?.id ?? plans[0]?.id ?? '');
         setConfirmExecuteId('');
         setVerification(null);
         refreshWorkspace();
@@ -173,7 +186,12 @@ function Home() {
         setConfirmExecuteId('');
         setExecutionAcknowledged(false);
         setNotice('The approved recovery plan was executed in the simulation. Verify the resulting shop state next.');
-        setAlternatives((current) => current.map((item) => item.id === plan.id ? { ...item, status: 'executed' } : item));
+        setAlternatives((current) => current.map((item) => {
+          if (item.id === plan.id) return { ...item, status: 'executed' };
+          return item.status === 'proposed' || item.status === 'approved'
+            ? { ...item, status: 'superseded' }
+            : item;
+        }));
         refreshWorkspace();
       },
     });
@@ -182,8 +200,12 @@ function Home() {
   const verifyPlan = (plan: RecoveryPlan) => verifyMutation.mutate({ planId: plan.id }, {
     onSuccess: (result) => {
       setVerification(result);
-      setAlternatives((current) => current.map((item) => item.id === plan.id ? { ...item, status: 'verified' } : item));
-      setNotice('Post-execution verification returned from the simulator.');
+      if (result.verified) {
+        setAlternatives((current) => current.map((item) => item.id === plan.id ? { ...item, status: 'verified' } : item));
+        setNotice('Persisted schedule verified against the plan forecast.');
+      } else {
+        setNotice('');
+      }
       refreshWorkspace();
     },
   });
@@ -211,6 +233,11 @@ function Home() {
   const taskById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
   const machineById = useMemo(() => new Map(machines.map((machine) => [machine.id, machine])), [machines]);
   const orderById = useMemo(() => new Map(orders.map((order) => [order.id, order])), [orders]);
+  const activeOrderCount = orders.filter((order) => order.status !== 'complete').length;
+  const riskOrderCount = orders.filter((order) => order.status === 'at_risk' || order.status === 'late').length;
+  const upcomingOrders = [...orders].sort((left, right) => left.dueDate.localeCompare(right.dueDate) || left.id.localeCompare(right.id));
+  const closestDeadline = upcomingOrders.find((order) => order.status !== 'complete')?.dueDate;
+  const taskHours = tasks.filter((task) => task.status !== 'complete').reduce((total, task) => total + task.durationHours, 0);
 
   if (shop.isLoading) return <div className="min-h-[100dvh] bg-[hsl(var(--background))] p-5 md:p-8"><Header health={health.data?.status} /><div className="mx-auto mt-8 max-w-[1440px]"><LoadingPanel /></div></div>;
 
@@ -220,7 +247,6 @@ function Home() {
       <Button testId="button-retry-state" className="mt-6" onClick={() => void shop.refetch()}><RefreshCw size={15} /> Retry connection</Button>
     </div></main></div>;
 
-  const activeDisruption = impact?.disruption ?? state.disruption;
   const affectedOrderIds = impact?.affectedOrderIds ?? [];
   const affectedTaskIds = impact?.affectedTaskIds ?? [];
   const targetOrders = impact
@@ -235,24 +261,44 @@ function Home() {
   return <div className="min-h-[100dvh] bg-[hsl(var(--background))] text-foreground">
     <Header health={health.data?.status} onHistory={() => setShowHistory(true)} />
     <main className="mx-auto max-w-[1540px] px-4 pb-12 pt-5 sm:px-6 lg:px-8">
-      <div className="mb-5 flex flex-col justify-between gap-3 border-b border-[hsl(var(--border))] pb-5 sm:flex-row sm:items-end">
-        <div>
-          <div className="mb-2 flex items-center gap-2"><span className="eyebrow">Shift recovery workspace</span><span className="rounded-sm bg-amber-100 px-1.5 py-0.5 font-mono text-[9px] font-medium uppercase tracking-wide text-amber-900">{state.simulationLabel || 'Simulated workshop data'}</span></div>
-          <h1 className="display text-[26px] font-semibold leading-tight tracking-[-.04em] sm:text-[32px]">Recover the shift. Protect the promise.</h1>
-          <p className="mt-1 text-sm text-muted-foreground">{state.scenarioName} <span className="mx-1.5 text-border">/</span> updated {formatTime(state.lastUpdated)}</p>
+      <section className="mb-6 grid gap-5 border-b border-[hsl(var(--border))] pb-6 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+        <div className="max-w-3xl">
+          <div className="mb-3 flex flex-wrap items-center gap-2"><span className="eyebrow">Northstar Custom Works / Shift A</span><span className="rounded-sm bg-amber-100 px-1.5 py-0.5 font-mono text-[9px] font-medium uppercase tracking-wide text-amber-900">{state.simulationLabel || 'Simulated workshop data'}</span></div>
+          <h1 className="display text-[28px] font-semibold leading-tight sm:text-[36px]">Can Palmer ship Friday without making another customer late?</h1>
+          <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted-foreground">A two-day plywood delay is on the board. CASCADE compares real schedule options against Palmer’s hard deadline and every other customer commitment.</p>
         </div>
-        <div className="flex items-center gap-2">
-          <div className="hidden items-center gap-2 rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-3 py-2 text-xs text-muted-foreground sm:flex"><Factory size={15} className="text-primary" /><span>Workshop online</span><span className="ml-1 h-1.5 w-1.5 rounded-full bg-emerald-600" /></div>
-          <Button kind="secondary" testId="button-refresh-workspace" onClick={refreshWorkspace}><RefreshCw size={14} /> Refresh</Button>
+        <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+          <div className="flex min-h-10 items-center gap-2 border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-3 text-xs text-muted-foreground"><span className={`h-2 w-2 rounded-full ${health.data?.status === 'ok' || health.data?.status === 'healthy' ? 'bg-emerald-600' : 'bg-amber-500'}`} /><span>API {health.data?.status ?? 'checking'}</span></div>
+          <Button kind="secondary" testId="button-refresh-workspace" onClick={refreshWorkspace}><RefreshCw size={14} /> Refresh data</Button>
         </div>
-      </div>
+      </section>
+
+      <section className="mb-6 grid grid-cols-2 border-y border-[hsl(var(--border))] sm:grid-cols-4" aria-label="Workshop summary">
+        <OverviewMetric label="Active orders" value={String(activeOrderCount)} detail={`${orders.length} total commitments`} icon={<Package size={16} />} />
+        <OverviewMetric label="At risk / late" value={String(riskOrderCount)} detail="Current persisted order status" icon={<AlertTriangle size={16} />} tone={riskOrderCount ? 'warn' : 'good'} />
+        <OverviewMetric label="Nearest due date" value={closestDeadline ? formatDate(closestDeadline) : '—'} detail="Across active customer orders" icon={<Clock3 size={16} />} />
+        <OverviewMetric label="Booked work" value={`${taskHours.toFixed(1)} h`} detail={`${tasks.length} production tasks`} icon={<Factory size={16} />} />
+      </section>
+
+      <ol className="mb-6 grid grid-cols-2 border border-[hsl(var(--border))] bg-[hsl(var(--card))] sm:grid-cols-4" aria-label="Recovery workflow">
+        {[
+          { label: 'Disruption', complete: Boolean(state.disruption), current: !state.disruption },
+          { label: 'Impact', complete: Boolean(impact), current: Boolean(state.disruption && !impact) },
+          { label: 'Decision', complete: state.plans.length > 0, current: Boolean(impact && !state.plans.length) },
+          { label: 'Verification', complete: state.plans.some((plan) => plan.status === 'verified'), current: state.plans.some((plan) => plan.status === 'executed') },
+        ].map((step, index) => <li key={step.label} className={`flex items-center gap-3 border-[hsl(var(--border))] px-4 py-3 ${index % 2 === 0 ? 'border-r' : ''} ${index > 1 ? 'sm:border-l' : ''} ${index < 2 ? 'sm:border-r' : ''}`}>
+          <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full font-mono text-[10px] ${step.complete ? 'bg-emerald-700 text-white' : step.current ? 'bg-[hsl(var(--primary))] text-white' : 'bg-[hsl(var(--muted))] text-muted-foreground'}`}>{step.complete ? <Check size={12} /> : `0${index + 1}`}</span>
+          <span className={`text-xs font-semibold ${step.current ? 'text-[hsl(var(--primary))]' : 'text-foreground'}`}>{step.label}</span>
+          {step.current && <span className="ml-auto h-1.5 w-1.5 rounded-full bg-[hsl(var(--accent))]" />}
+        </li>)}
+      </ol>
 
       {errorText && <div role="alert" data-testid="status-request-error" className="mb-4 flex items-center justify-between gap-3 rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
         <span><strong>Request did not complete.</strong> {errorText}</span><Button kind="quiet" testId="button-dismiss-error" onClick={() => { simulateMutation.reset(); analyzeMutation.reset(); proposeMutation.reset(); approveMutation.reset(); executeMutation.reset(); verifyMutation.reset(); }}><X size={15} /> Dismiss</Button>
       </div>}
       {notice && <div role="status" data-testid="status-action-notice" className="mb-4 flex items-center justify-between rounded-md border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-sm text-emerald-900"><span className="flex items-center gap-2"><CheckCircle2 size={16} />{notice}</span><button aria-label="Dismiss message" data-testid="button-dismiss-notice" onClick={() => setNotice('')}><X size={15} /></button></div>}
 
-      <div className="grid min-w-0 items-start gap-5 xl:grid-cols-[minmax(0,1.65fr)_minmax(330px,.9fr)]">
+      <div className="min-w-0 space-y-6">
         <div className="min-w-0 space-y-5">
           <section className="panel overflow-hidden" aria-labelledby="scenario-heading">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[hsl(var(--border))] px-5 py-3.5">
@@ -283,8 +329,8 @@ function Home() {
                   <Button kind="secondary" testId="button-voice-capture" onClick={startVoiceInput} aria-label="Capture disruption by voice">
                     <Mic size={15} />{voiceListening ? 'Listening…' : 'Speak'}
                   </Button>
-                  <Button testId="button-simulate-disruption" onClick={runSimulation} disabled={anyPending || !selectedMaterialId}>
-                    {simulateMutation.isPending ? <><RefreshCw size={14} className="animate-spin" /> Simulating</> : <><Siren size={15} /> Simulate disruption</>}
+                      <Button testId="button-simulate-disruption" onClick={runSimulation} disabled={anyPending || !selectedMaterialId || Boolean(state.disruption)}>
+                        {simulateMutation.isPending ? <><RefreshCw size={14} className="animate-spin" /> Simulating</> : state.disruption ? <><CheckCircle2 size={15} /> Scenario active</> : <><Siren size={15} /> Simulate disruption</>}
                   </Button>
                 </div>
               </div>
@@ -300,7 +346,13 @@ function Home() {
             {activeDisruption ? <div className="p-5">
               <div className="flex flex-col justify-between gap-3 rounded-md border border-amber-200 bg-amber-50/75 p-4 sm:flex-row sm:items-center">
                 <div className="flex gap-3"><div className="mt-0.5 text-amber-800"><Truck size={18} /></div><div><div className="flex flex-wrap items-center gap-2"><strong className="text-sm">{activeDisruption.materialName} shipment delayed</strong><Status tone="warn">+{activeDisruption.delayDays} days</Status></div><p className="mt-1 text-xs text-amber-900/75">{activeDisruption.simulationLabel || 'Simulated supplier disruption'} · Reported {formatTime(activeDisruption.reportedAt)}</p></div></div>
-                <div className="flex gap-5 pl-8 sm:pl-0"><Metric label="Orders exposed" value={impact ? String(affectedOrderIds.length) : '—'} /><Metric label="Tasks affected" value={impact ? String(affectedTaskIds.length) : '—'} /></div>
+                <div className="flex flex-wrap gap-5 pl-8 sm:pl-0"><Metric label="Orders exposed" value={impact ? String(affectedOrderIds.length) : '—'} /><Metric label="Tasks affected" value={impact ? String(affectedTaskIds.length) : '—'} /></div>
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-[hsl(var(--border))] pb-3 text-xs">
+                <span className="text-muted-foreground">Inbound arrival</span><span className="mono">{formatDate(activeDisruption.originalArrivalDate)} <ArrowRight size={12} className="mx-1 inline text-amber-700" /> {formatDate(activeDisruption.revisedArrivalDate)}</span>
+                <span className="text-muted-foreground">{selectedMaterial?.delayedShipment ?? 0} {selectedMaterial?.unit ?? 'units'} inbound</span>
+                {impact && affectedOrderIds.length > 0 && <span className="font-medium text-amber-900">{impact.affectedOrderIds.length} commitments exposed to the stock gap</span>}
+                {impact && affectedOrderIds.length === 0 && <span className="font-medium text-emerald-800">No orders currently exposed on the persisted schedule</span>}
               </div>
               {analyzeMutation.isPending && !impact ? <div className="my-4 flex items-center gap-2 rounded border border-[hsl(var(--border))] bg-[hsl(var(--background))] px-3 py-3 text-xs text-muted-foreground" role="status" data-testid="status-impact-loading"><RefreshCw size={14} className="animate-spin text-primary" /> Restoring impact analysis from the simulated shop state…</div> :
                 analyzeMutation.isError && !impact ? <div className="my-4 flex items-center justify-between gap-3 rounded border border-rose-200 bg-rose-50 px-3 py-3 text-xs text-rose-900" role="alert" data-testid="status-impact-error"><span>Impact analysis could not be restored. {analyzeMutation.error instanceof Error ? analyzeMutation.error.message : 'Try recalculating.'}</span><Button kind="secondary" testId="button-retry-impact" onClick={recalculateImpact}><RefreshCw size={13} /> Retry</Button></div> :
@@ -322,7 +374,7 @@ function Home() {
             {orders.length ? <div className="overflow-x-auto">
               <table className="w-full min-w-[680px] border-collapse text-left">
                 <thead><tr className="border-b border-[hsl(var(--border))] bg-[hsl(var(--background))] text-[10px] uppercase tracking-[.08em] text-muted-foreground"><th className="px-5 py-2.5 font-medium">Order / customer</th><th className="px-4 py-2.5 font-medium">Product</th><th className="px-4 py-2.5 font-medium">Qty</th><th className="px-4 py-2.5 font-medium">Due</th><th className="px-4 py-2.5 font-medium">Priority</th><th className="px-5 py-2.5 font-medium">Schedule</th></tr></thead>
-                <tbody>{orders.map((order) => <tr key={order.id} data-testid={`row-order-${order.id}`} className={`border-b border-[hsl(var(--border))] last:border-0 ${affectedOrderIds.includes(order.id) ? 'bg-amber-50/50' : ''}`}>
+                <tbody>{upcomingOrders.map((order) => <tr key={order.id} data-testid={`row-order-${order.id}`} className={`border-b border-[hsl(var(--border))] last:border-0 ${affectedOrderIds.includes(order.id) ? 'bg-amber-50/50' : ''}`}>
                   <td className="px-5 py-3"><div className="mono text-[10px] text-muted-foreground">{order.id}</div><div className="mt-0.5 text-xs font-semibold">{order.customer}</div></td>
                   <td className="px-4 py-3 text-xs">{order.product}</td><td className="px-4 py-3 mono text-xs">{order.quantity}</td><td className="px-4 py-3 mono text-xs">{formatDate(order.dueDate)}</td>
                   <td className="px-4 py-3"><Status tone={order.priority === 'urgent' ? 'bad' : order.priority === 'high' ? 'warn' : 'neutral'}>{order.priority}</Status></td>
@@ -349,8 +401,9 @@ function Home() {
 
         <aside className="min-w-0 space-y-5">
           <section className="panel overflow-hidden" aria-labelledby="recovery-heading">
-            <div className="flex items-center justify-between border-b border-[hsl(var(--border))] px-5 py-3.5">
-              <div className="flex items-center gap-2"><div className="flex h-7 w-7 items-center justify-center rounded bg-[hsl(var(--primary))] text-white"><WandSparkles size={15} /></div><h2 id="recovery-heading" className="text-sm font-semibold">Recovery workbench</h2></div><span className="eyebrow">03 / Decide</span>
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[hsl(var(--border))] px-5 py-3.5">
+              <div className="flex items-center gap-2"><div className="flex h-7 w-7 items-center justify-center rounded bg-[hsl(var(--primary))] text-white"><WandSparkles size={15} /></div><div><h2 id="recovery-heading" className="text-sm font-semibold">Compare recovery plans</h2><p className="mt-0.5 text-[11px] text-muted-foreground">04 / Decide · deterministic schedule and cost</p></div></div>
+              <Status tone={state.plans.some((plan) => plan.status === 'verified') ? 'good' : state.plans.some((plan) => plan.status === 'executed') ? 'warn' : 'neutral'}>{state.plans.find((plan) => plan.status === 'verified') ? 'verified' : state.plans.find((plan) => plan.status === 'executed') ? 'executed' : state.plans.some((plan) => plan.status === 'approved') ? 'approved' : 'proposed'}</Status>
             </div>
             {impact || state.disruption ? <div className="p-5">
               <label htmlFor="target-order" className="eyebrow">Protect a delivery commitment</label>
@@ -368,16 +421,16 @@ function Home() {
             </div> : <div className="border-b border-[hsl(var(--border))]"><EmptyBlock icon={<WandSparkles size={18} />} title="Waiting for a disruption" detail="Run a disruption simulation before comparing recovery alternatives." /></div>}
 
             {proposeMutation.isPending && <div className="space-y-3 p-5"><div className="skeleton h-20" /><div className="skeleton h-20" /></div>}
-            {localActions.length > 0 && <div className="divide-y divide-[hsl(var(--border))]">
-              <div className="flex items-center justify-between px-5 py-3"><span className="eyebrow">{alternatives.length ? 'Proposed alternatives' : 'Existing recovery plans'}</span><span className="mono text-[10px] text-muted-foreground">{localActions.length} plans</span></div>
-              {localActions.map((plan, index) => <RecoveryCard key={plan.id} plan={plan} index={index} active={activePlanId === plan.id}
-                onSelect={() => setActivePlanId(plan.id)} onApprove={() => approvePlan(plan)}
-                onExecute={() => { setConfirmExecuteId(plan.id); setExecutionAcknowledged(false); }}
-                onVerify={() => verifyPlan(plan)} anyPending={anyPending} />)}
+            {localActions.length > 0 && <div className="border-t border-[hsl(var(--border))] px-5 pt-4">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><span className="eyebrow">{alternatives.length ? 'Computed alternatives' : 'Persisted alternatives'}</span><span className="mono text-[10px] text-muted-foreground">{localActions.length} plans · recommendation marked by policy</span></div>
+              <div className="grid gap-3 md:grid-cols-3">
+                {localActions.map((plan, index) => <RecoveryCard key={plan.id} plan={plan} index={index} active={activePlanId === plan.id} onSelect={() => setActivePlanId(plan.id)} />)}
+              </div>
+              <p className="mt-4 border-l-2 border-[hsl(var(--accent))] bg-[hsl(var(--background))] px-3 py-2.5 text-xs leading-relaxed text-muted-foreground"><strong className="text-foreground">Constraint policy:</strong> Palmer’s Friday deadline is a hard requirement. Other customer deadlines remain visible preferences and late-order penalties; an infeasible plan never counts as a recommendation.</p>
             </div>}
 
             {activePlan && <div className="border-t border-[hsl(var(--border))] bg-[hsl(var(--background))] p-5" data-testid={`panel-plan-detail-${activePlan.id}`}>
-              <div className="flex items-start justify-between gap-2"><div><span className="eyebrow">Selected strategy</span><h3 className="mt-1 text-sm font-semibold">{activePlan.name}</h3></div><Status tone={activePlan.status === 'verified' ? 'good' : activePlan.status === 'executed' ? 'good' : activePlan.status === 'approved' ? 'warn' : 'neutral'}>{activePlan.status}</Status></div>
+              <div className="flex flex-wrap items-start justify-between gap-3"><div><span className="eyebrow">Selected strategy / {activePlan.feasible ? 'feasible' : 'infeasible'}</span><h3 className="mt-1 text-sm font-semibold">{activePlan.name}</h3></div><Status tone={!activePlan.feasible ? 'bad' : activePlan.status === 'verified' ? 'good' : activePlan.status === 'executed' || activePlan.status === 'approved' ? 'warn' : 'neutral'}>{activePlan.status}</Status></div>
               <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{activePlan.rationale}</p>
               <div className="mt-3 grid grid-cols-3 gap-2">
                 <MiniMetric label="Plan cost" value={formatMoney(activePlan.cost)} />
@@ -385,7 +438,18 @@ function Home() {
                 <MiniMetric label="Late" value={String(activePlan.lateOrders)} danger={activePlan.lateOrders > 0} />
               </div>
               <div className="mt-4"><span className="eyebrow">Trade-offs & risks</span>{activePlan.risks.length ? <ul className="mt-2 space-y-1.5">{activePlan.risks.map((risk, index) => <li key={`${index}-${risk}`} className="flex gap-2 text-xs leading-relaxed text-muted-foreground"><AlertTriangle size={13} className="mt-0.5 shrink-0 text-amber-700" />{risk}</li>)}</ul> : <p className="mt-2 text-xs text-muted-foreground">No risks returned by the simulator.</p>}</div>
-              <div className="mt-4"><span className="eyebrow">Proposed actions</span>{activePlan.actions.length ? <ol className="mt-2 space-y-2">{activePlan.actions.map((action, index) => <li key={`${index}-${action}`} className="flex gap-2 text-xs leading-relaxed"><span className="mono flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[hsl(var(--secondary))] text-[9px]">{index + 1}</span>{action}</li>)}</ol> : <p className="mt-2 text-xs text-muted-foreground">No action details returned.</p>}</div>
+              <div className="mt-4"><span className="eyebrow">Schedule and cost actions</span>{activePlan.actions.length ? <ol className="mt-2 grid gap-2 md:grid-cols-2">{activePlan.actions.map((action, index) => <li key={`${index}-${action}`} className="flex gap-2 border-l border-[hsl(var(--border))] py-1 pl-3 text-xs leading-relaxed"><span className="mono text-[10px] text-muted-foreground">{String(index + 1).padStart(2, '0')}</span>{action}</li>)}</ol> : <p className="mt-2 text-xs text-muted-foreground">No action details returned.</p>}</div>
+
+              {(activePlan.status === 'executed' || activePlan.status === 'verified') && <section className="mt-5 border-t border-[hsl(var(--border))] pt-4" aria-labelledby="executed-state-heading" data-testid="panel-executed-schedule">
+                <div className="flex flex-wrap items-center justify-between gap-2"><div><span className="eyebrow">Persisted result</span><h4 id="executed-state-heading" className="mt-1 text-xs font-semibold">Schedule and inventory after execution</h4></div><Status tone={activePlan.status === 'verified' ? 'good' : 'warn'}>{activePlan.status === 'verified' ? 'verified state' : 'executed state'}</Status></div>
+                <div className="mt-3 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(220px,.34fr)]">
+                  <div className="min-w-0">
+                    <p className="eyebrow">Changed customer schedules</p>
+                    {selectedPlanChanges.length ? <ul className="mt-2 grid gap-x-4 gap-y-2 sm:grid-cols-2">{selectedPlanChanges.map((task) => <li key={task.id} className="flex min-w-0 items-start justify-between gap-3 border-b border-[hsl(var(--border))] pb-2 text-xs"><span className="min-w-0"><span className="block truncate font-medium">{task.name}</span><span className="mt-0.5 block text-[10px] text-muted-foreground">{orderById.get(task.orderId)?.customer ?? task.orderId}</span></span><span className="mono shrink-0">{formatDate(task.scheduledDate)}</span></li>)}</ul> : <p className="mt-2 text-xs text-muted-foreground">This plan retained the existing task dates.</p>}
+                  </div>
+                  {recoveredMaterial && <div className="border-l border-[hsl(var(--border))] pl-4"><p className="eyebrow">{recoveredMaterial.name}</p><p className="mono mt-2 text-sm font-medium">{recoveredMaterial.available} {recoveredMaterial.unit} available</p><p className="mt-1 text-[10px] text-muted-foreground">Inbound {recoveredMaterial.delayedShipment} · {formatDate(recoveredMaterial.scheduledArrival)}</p></div>}
+                </div>
+              </section>}
 
               {activePlan.feasible && activePlan.status === 'proposed' && <Button testId={`button-approve-plan-${activePlan.id}`} className="mt-5 w-full" disabled={anyPending} onClick={() => approvePlan(activePlan)}>
                 {approveMutation.isPending ? <RefreshCw size={14} className="animate-spin" /> : <Check size={15} />} Explicitly approve plan
@@ -403,7 +467,7 @@ function Home() {
               {activePlan.status === 'executed' && <Button testId={`button-verify-plan-${activePlan.id}`} className="mt-5 w-full" disabled={anyPending} onClick={() => verifyPlan(activePlan)}>
                 {verifyMutation.isPending ? <RefreshCw size={14} className="animate-spin" /> : <ShieldCheck size={15} />} Verify simulated outcome
               </Button>}
-              {activePlan.status === 'verified' && <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-900"><div className="flex items-center gap-2 font-semibold"><CheckCircle2 size={15} />Recovery verified</div><p className="mt-1">Verification has been recorded for this plan.</p></div>}
+              {activePlan.status === 'verified' && !verification && verifyMutation.isPending && <div className="mt-4 flex items-center gap-2 border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-3 text-xs text-muted-foreground" role="status"><RefreshCw size={14} className="animate-spin" />Restoring independent verification from persisted state…</div>}
             </div>}
             {verification && <VerificationPanel result={verification} />}
           </section>
@@ -458,6 +522,17 @@ function Metric({ label, value }: { label: string; value: string }) {
   return <div><div className="eyebrow">{label}</div><div className="display mt-0.5 text-xl font-semibold tracking-tight" data-testid={`metric-${label.toLowerCase().replaceAll(' ', '-')}`}>{value}</div></div>;
 }
 
+function OverviewMetric({ label, value, detail, icon, tone = 'neutral' }: {
+  label: string; value: string; detail: string; icon: ReactNode; tone?: 'good' | 'warn' | 'neutral';
+}) {
+  const iconTone = tone === 'good' ? 'text-emerald-700' : tone === 'warn' ? 'text-amber-700' : 'text-[hsl(var(--primary))]';
+  return <div className="min-w-0 border-[hsl(var(--border))] px-3 py-4 sm:border-r sm:px-5 last:border-0">
+    <div className="flex items-center gap-2"><span className={iconTone}>{icon}</span><span className="eyebrow">{label}</span></div>
+    <div className="display mt-2 truncate text-2xl font-semibold" data-testid={`overview-${label.toLowerCase().replaceAll(' ', '-')}`}>{value}</div>
+    <p className="mt-1 truncate text-[10px] text-muted-foreground">{detail}</p>
+  </div>;
+}
+
 function MiniMetric({ label, value, danger }: { label: string; value: string; danger?: boolean }) {
   return <div className="rounded border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-2.5 py-2"><div className="eyebrow">{label}</div><div className={`mono mt-1 text-sm font-medium ${danger ? 'text-rose-700' : ''}`} data-testid={`value-${label.toLowerCase().replaceAll(' ', '-')}`}>{value}</div></div>;
 }
@@ -498,19 +573,28 @@ function DependencyGraph({ impact }: { impact: ImpactAnalysis }) {
   </div>;
 }
 
-function RecoveryCard({ plan, index, active, onSelect, onApprove, onExecute, onVerify, anyPending }: {
-  plan: RecoveryPlan; index: number; active: boolean; onSelect: () => void; onApprove: () => void; onExecute: () => void; onVerify: () => void; anyPending: boolean;
+function RecoveryCard({ plan, index, active, onSelect }: {
+  plan: RecoveryPlan; index: number; active: boolean; onSelect: () => void;
 }) {
+  const recommended = plan.rationale.startsWith('Recommended by policy');
   const tone = !plan.feasible ? 'bad' : plan.status === 'verified' ? 'good' : plan.status === 'approved' || plan.status === 'executed' ? 'warn' : 'neutral';
-  return <article data-testid={`card-recovery-plan-${plan.id}`} className={`cursor-pointer px-5 py-3.5 transition-colors ${active ? 'bg-[hsl(var(--primary))]/[.055] shadow-[inset_3px_0_0_hsl(var(--primary))]' : 'hover:bg-[hsl(var(--background))]'}`} onClick={onSelect}>
-    <div className="flex items-start justify-between gap-3"><div className="flex min-w-0 gap-2.5"><span className="mono mt-0.5 text-[10px] text-muted-foreground">0{index + 1}</span><div className="min-w-0"><h3 className="text-xs font-semibold">{plan.name}</h3><p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-muted-foreground">{plan.strategy}</p></div></div><Status tone={tone}>{plan.feasible ? plan.status : 'not feasible'}</Status></div>
-    <div className="mt-2 flex items-center justify-between pl-6"><span className="mono text-[10px] text-muted-foreground">{formatMoney(plan.cost)} <span className="mx-1.5 text-border">·</span>{plan.onTimeOrders} on time <span className="mx-1 text-border">/</span>{plan.lateOrders} late</span><button data-testid={`button-view-plan-${plan.id}`} onClick={(event) => { event.stopPropagation(); onSelect(); }} className="inline-flex items-center gap-1 text-[10px] font-semibold text-primary">Details <ChevronRight size={12} /></button></div>
-    {plan.feasible && (plan.status === 'proposed' || plan.status === 'approved' || plan.status === 'executed') && <div className="mt-3 flex justify-end gap-1.5 pl-6" onClick={(event) => event.stopPropagation()}>
-      {plan.status === 'proposed' && <button data-testid={`button-quick-approve-${plan.id}`} disabled={anyPending} onClick={onApprove} className="rounded border border-[hsl(var(--border))] px-2 py-1 text-[10px] font-semibold hover:bg-[hsl(var(--card))] disabled:opacity-50"><Check size={11} className="mr-1 inline" />Approve</button>}
-      {plan.status === 'approved' && <button data-testid={`button-quick-execute-${plan.id}`} disabled={anyPending} onClick={onExecute} className="rounded bg-rose-700 px-2 py-1 text-[10px] font-semibold text-white hover:bg-rose-800 disabled:opacity-50"><ArrowDownRight size={11} className="mr-1 inline" />Execution review</button>}
-      {plan.status === 'executed' && <button data-testid={`button-quick-verify-${plan.id}`} disabled={anyPending} onClick={onVerify} className="rounded border border-[hsl(var(--border))] px-2 py-1 text-[10px] font-semibold hover:bg-[hsl(var(--card))] disabled:opacity-50"><ShieldCheck size={11} className="mr-1 inline" />Verify</button>}
-    </div>}
-  </article>;
+  return <button type="button" data-testid={`card-recovery-plan-${plan.id}`} aria-pressed={active} onClick={onSelect}
+    className={`flex min-h-[220px] w-full flex-col border p-4 text-left transition-colors ${active ? 'border-[hsl(var(--primary))] bg-[hsl(var(--primary))]/[.045] shadow-[inset_3px_0_0_hsl(var(--primary))]' : 'border-[hsl(var(--border))] bg-[hsl(var(--card))] hover:bg-[hsl(var(--background))]'}`}>
+    <span className="flex w-full items-center justify-between gap-2"><span className="eyebrow">Option 0{index + 1}</span><Status tone={tone}>{plan.feasible ? plan.status : 'not feasible'}</Status></span>
+    {recommended && <span className="mt-3 inline-flex w-fit items-center gap-1.5 font-mono text-[9px] font-medium uppercase text-emerald-800"><CheckCircle2 size={12} />Policy recommendation</span>}
+    <h3 className="mt-3 text-sm font-semibold leading-snug">{plan.name}</h3>
+    <p className="mt-1 min-h-8 text-[11px] leading-relaxed text-muted-foreground">{plan.strategy}</p>
+    <div className="mt-4 grid w-full grid-cols-3 border-y border-[hsl(var(--border))] py-2.5">
+      <div><div className="eyebrow">Cost</div><div className="mono mt-1 text-sm font-medium">{formatMoney(plan.cost)}</div></div>
+      <div><div className="eyebrow">On time</div><div className="mono mt-1 text-sm font-medium text-emerald-800">{plan.onTimeOrders}</div></div>
+      <div><div className="eyebrow">Late</div><div className={`mono mt-1 text-sm font-medium ${plan.lateOrders ? 'text-rose-700' : ''}`}>{plan.lateOrders}</div></div>
+    </div>
+    <div className="mt-auto flex items-center justify-between gap-2 pt-3 text-[10px] text-muted-foreground">
+      <span>{plan.affectedOrders.length} orders re-sequenced</span>
+      <span className="inline-flex items-center gap-1 font-semibold text-primary">{active ? 'Selected' : 'Review'} <ChevronRight size={12} /></span>
+    </div>
+    {plan.risks.length > 0 && <p className="mt-2 line-clamp-2 text-[10px] leading-relaxed text-amber-900"><AlertTriangle size={12} className="mr-1 inline" />{plan.risks[0]}</p>}
+  </button>;
 }
 
 function VerificationPanel({ result }: { result: VerificationResult }) {
