@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import type { Request, Response } from "express";
 import { logger } from "../logger";
+import { DomainError } from "./domain";
 import {
   dispatchCascadeTool,
 } from "./tools";
@@ -150,8 +151,9 @@ function result(value: unknown) {
 }
 
 function errorResult(error: unknown) {
-  const message =
-    error instanceof Error ? error.message : "Unknown CASCADE tool error.";
+  const message = error instanceof DomainError
+    ? error.message
+    : "CASCADE tool failed. Check the request or try again.";
   return {
     isError: true,
     content: [{ type: "text" as const, text: message }],

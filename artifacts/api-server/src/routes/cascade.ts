@@ -31,7 +31,7 @@ function reportError(
     return;
   }
   if (error instanceof Error && error.name === "ZodError") {
-    res.status(400).json({ error: error.message });
+    res.status(400).json({ error: "Request validation failed." });
     return;
   }
   req.log.error({ err: error }, "CASCADE API request failed");

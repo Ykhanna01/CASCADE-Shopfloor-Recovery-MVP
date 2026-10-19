@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { FormEvent, ReactNode } from 'react';
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query';
 import {
   Activity, AlertTriangle, ArrowDownRight, ArrowRight, AudioLines, Check, CheckCircle2,
   ChevronRight, CircleHelp, Clock3, Command, Factory, FileClock, HardHat, Layers3,
-  Mic, Package, Radio, RefreshCw, ShieldCheck, Siren, Truck, WandSparkles, X,
+  LogOut, Mic, Package, Radio, RefreshCw, ShieldCheck, Siren, Truck, WandSparkles, X,
 } from 'lucide-react';
 import {
   getGetActionHistoryQueryKey, getGetShopStateQueryKey, getHealthCheckQueryKey,
@@ -12,6 +12,7 @@ import {
   useGetShopState, useHealthCheck, useProposeRecovery, useSimulateDisruption,
   useVerifyRecovery,
 } from '@workspace/api-client-react';
+import { setCsrfToken } from '@workspace/api-client-react';
 import type { ActionEvent, ImpactAnalysis, RecoveryPlan, VerificationResult } from '@workspace/api-client-react';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { Toaster } from '@/components/ui/toaster';
@@ -56,8 +57,38 @@ function LoadingPanel() {
   </div>;
 }
 
+function SignInPanel({ password, error, pending, onPasswordChange, onSubmit }: {
+  password: string;
+  error: string;
+  pending: boolean;
+  onPasswordChange: (value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  return <div className="min-h-[100dvh] bg-[hsl(var(--background))] text-foreground">
+    <Header />
+    <main className="mx-auto max-w-md px-5 py-16">
+      <section className="panel p-6 sm:p-8">
+        <span className="eyebrow">Private demonstration</span>
+        <h1 className="display mt-2 text-2xl font-semibold">Sign in to CASCADE</h1>
+        <p className="mt-2 text-sm leading-relaxed text-muted-foreground">Use the reviewer access password provided by the project owner. It is sent only to the server and is never stored in browser build configuration.</p>
+        <form className="mt-6 space-y-4" onSubmit={onSubmit}>
+          <label className="grid gap-1.5 text-xs font-medium" htmlFor="demo-password">Demo access password
+            <input id="demo-password" data-testid="input-demo-password" type="password" autoComplete="current-password" required value={password} onChange={(event) => onPasswordChange(event.target.value)} className="h-10 rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--background))] px-3 outline-none focus:border-primary" />
+          </label>
+          {error && <p role="alert" className="rounded border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-900">{error}</p>}
+          <Button testId="button-demo-login" type="submit" disabled={pending || password.length === 0} className="w-full">{pending ? <><RefreshCw size={14} className="animate-spin" /> Signing in</> : 'Sign in'}</Button>
+        </form>
+      </section>
+    </main>
+  </div>;
+}
+
 function Home() {
   const queryClient = useQueryClient();
+  const [authSession, setAuthSession] = useState({ checked: false, required: false, authenticated: false, csrfToken: null as string | null, unavailable: false });
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginPending, setLoginPending] = useState(false);
+  const [loginError, setLoginError] = useState('');
   const shop = useGetShopState();
   const history = useGetActionHistory();
   const health = useHealthCheck();
@@ -82,6 +113,26 @@ function Home() {
   const [voiceListening, setVoiceListening] = useState(false);
   const analyzedDisruptionId = useRef('');
   const restoredVerificationPlanId = useRef('');
+
+  useEffect(() => {
+    let active = true;
+    setCsrfToken(null);
+    fetch('/api/auth/session', { credentials: 'same-origin', cache: 'no-store' })
+      .then(async (response) => {
+        if (!response.ok) throw new Error('Session check failed.');
+        return response.json() as Promise<{ authRequired: boolean; authenticated: boolean; csrfToken: string | null }>;
+      })
+      .then((session) => {
+        if (!active) return;
+        setCsrfToken(session.csrfToken);
+        setAuthSession({ required: session.authRequired, authenticated: session.authenticated, csrfToken: session.csrfToken, checked: true, unavailable: false });
+      })
+      .catch(() => {
+        if (!active) return;
+        setAuthSession({ checked: true, required: true, authenticated: false, csrfToken: null, unavailable: true });
+      });
+    return () => { active = false; };
+  }, []);
 
   const state = shop.data;
   const orders = state?.orders ?? [];
@@ -108,6 +159,7 @@ function Home() {
   const errorText = firstError instanceof Error ? firstError.message : firstError ? 'The service could not complete that request.' : '';
 
   useEffect(() => {
+    if (!authSession.checked || (authSession.required && !authSession.authenticated)) return;
     const disruption = state?.disruption;
     if (!disruption) {
       analyzedDisruptionId.current = '';
@@ -120,7 +172,7 @@ function Home() {
     analyzeMutation.mutate(undefined, {
       onSuccess: (result) => setImpact(result),
     });
-  }, [state?.disruption?.id]);
+  }, [authSession.checked, authSession.required, authSession.authenticated, state?.disruption?.id]);
 
   useEffect(() => {
     if (!state?.plans.length) return;
@@ -132,13 +184,52 @@ function Home() {
   }, [state?.plans, alternatives, activePlanId]);
 
   useEffect(() => {
+    if (!authSession.checked || (authSession.required && !authSession.authenticated)) return;
     const verifiedPlan = state?.plans.find((plan) => plan.status === 'verified');
     if (!verifiedPlan || verification?.planId === verifiedPlan.id || restoredVerificationPlanId.current === verifiedPlan.id) return;
     restoredVerificationPlanId.current = verifiedPlan.id;
     verifyMutation.mutate({ planId: verifiedPlan.id }, {
       onSuccess: (result) => setVerification(result),
     });
-  }, [state?.plans, verification?.planId]);
+  }, [authSession.checked, authSession.required, authSession.authenticated, state?.plans, verification?.planId]);
+
+  const login = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setLoginPending(true);
+    setLoginError('');
+    try {
+      const response = await fetch('/api/auth/session', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ password: loginPassword }),
+      });
+      if (!response.ok) throw new Error('Sign-in was not accepted. Check the demo access password.');
+      const session = await response.json() as { authRequired: boolean; authenticated: boolean; csrfToken: string | null };
+      if (!session.authenticated || !session.csrfToken) throw new Error('The server did not establish a secure session.');
+      setCsrfToken(session.csrfToken);
+      setAuthSession({ required: session.authRequired, authenticated: session.authenticated, csrfToken: session.csrfToken, checked: true, unavailable: false });
+      setLoginPassword('');
+    } catch (error) {
+      setLoginError(error instanceof Error ? error.message : 'Unable to sign in.');
+    } finally {
+      setLoginPending(false);
+    }
+  };
+
+  const logout = async () => {
+    try {
+      await fetch('/api/auth/session', {
+        method: 'DELETE',
+        credentials: 'same-origin',
+        headers: authSession.csrfToken ? { 'x-csrf-token': authSession.csrfToken } : {},
+      });
+    } finally {
+      setCsrfToken(null);
+      setAuthSession({ checked: true, required: true, authenticated: false, csrfToken: null, unavailable: false });
+      setVerification(null);
+    }
+  };
 
   const runSimulation = () => {
     if (!selectedMaterialId) return;
@@ -241,6 +332,12 @@ function Home() {
 
   if (shop.isLoading) return <div className="min-h-[100dvh] bg-[hsl(var(--background))] p-5 md:p-8"><Header health={health.data?.status} /><div className="mx-auto mt-8 max-w-[1440px]"><LoadingPanel /></div></div>;
 
+  if (!authSession.checked) return <div className="min-h-[100dvh] bg-[hsl(var(--background))] p-5 md:p-8"><Header health={health.data?.status} /><div className="mx-auto mt-8 max-w-[1440px]"><LoadingPanel /></div></div>;
+
+  if (authSession.unavailable) return <div className="min-h-[100dvh] bg-[hsl(var(--background))]"><Header health={health.data?.status} /><main className="mx-auto max-w-2xl px-5 py-24"><div className="panel p-7"><h1 className="display text-2xl font-semibold">Secure session unavailable</h1><p className="mt-2 text-sm text-muted-foreground">CASCADE could not check demo access. The workshop remains read-only until authentication is available.</p><Button testId="button-retry-session" className="mt-6" onClick={() => window.location.reload()}><RefreshCw size={15} /> Retry connection</Button></div></main></div>;
+
+  if (authSession.required && !authSession.authenticated) return <SignInPanel password={loginPassword} error={loginError} pending={loginPending} onPasswordChange={setLoginPassword} onSubmit={login} />;
+
   if (shop.isError || !state) return <div className="min-h-[100dvh] bg-[hsl(var(--background))]"><Header health={health.data?.status} /><main className="mx-auto max-w-2xl px-5 py-24">
     <div className="panel p-7"><div className="mb-4 flex h-11 w-11 items-center justify-center rounded-full bg-rose-100 text-rose-700"><AlertTriangle size={20} /></div>
       <h1 className="display text-2xl font-semibold">Workshop state unavailable</h1><p className="mt-2 text-sm text-muted-foreground">{shop.error instanceof Error ? shop.error.message : 'CASCADE could not load the simulated workshop.'}</p>
@@ -259,7 +356,7 @@ function Home() {
     : targetOrders[0]?.id ?? '';
   const localActions = alternatives.length ? alternatives : state.plans;
   return <div className="min-h-[100dvh] bg-[hsl(var(--background))] text-foreground">
-    <Header health={health.data?.status} onHistory={() => setShowHistory(true)} />
+    <Header health={health.data?.status} onHistory={() => setShowHistory(true)} onLogout={authSession.required ? logout : undefined} />
     <main className="mx-auto max-w-[1540px] px-4 pb-12 pt-5 sm:px-6 lg:px-8">
       <section className="mb-6 grid gap-5 border-b border-[hsl(var(--border))] pb-6 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
         <div className="max-w-3xl">
@@ -503,7 +600,7 @@ function Home() {
   </div>;
 }
 
-function Header({ health, onHistory }: { health?: string; onHistory?: () => void }) {
+function Header({ health, onHistory, onLogout }: { health?: string; onHistory?: () => void; onLogout?: () => void }) {
   return <header className="border-b border-[hsl(var(--sidebar-border))] bg-[hsl(var(--sidebar))] text-[hsl(var(--sidebar-foreground))]">
     <div className="mx-auto flex h-[58px] max-w-[1540px] items-center justify-between px-4 sm:px-6 lg:px-8">
       <div className="flex items-center gap-3"><div className="relative flex h-8 w-8 items-center justify-center rounded-md bg-[hsl(var(--sidebar-primary))] text-[hsl(var(--sidebar-primary-foreground))]"><Command size={18} strokeWidth={2.5} /><span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-[hsl(var(--sidebar))] bg-[hsl(var(--accent))]" /></div>
@@ -512,6 +609,7 @@ function Header({ health, onHistory }: { health?: string; onHistory?: () => void
       </div>
       <div className="flex items-center gap-3"><div className="hidden items-center gap-2 font-mono text-[10px] uppercase tracking-wide text-white/65 sm:flex"><Radio size={13} className={health === 'ok' || health === 'healthy' ? 'text-emerald-300' : 'text-amber-300'} />Service {health ?? 'checking'}</div>
         {onHistory && <button onClick={onHistory} data-testid="button-open-history-header" className="flex min-h-9 items-center gap-2 rounded border border-white/20 px-3 text-xs font-medium hover:bg-white/10"><FileClock size={14} /> History</button>}
+        {onLogout && <button onClick={onLogout} data-testid="button-demo-logout" className="flex min-h-9 items-center gap-2 rounded border border-white/20 px-3 text-xs font-medium hover:bg-white/10"><LogOut size={14} /> Sign out</button>}
         <div className="hidden items-center gap-1.5 text-[10px] text-white/50 sm:flex"><span className="mono">SHIFT A</span><span className="text-white/25">·</span><span className="mono">DEMO</span></div>
       </div>
     </div>
