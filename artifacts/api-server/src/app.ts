@@ -1,6 +1,7 @@
 import express, { type Express } from "express";
 import cors from "cors";
 import pinoHttp from "pino-http";
+import { fileURLToPath } from "node:url";
 import { pool } from "@workspace/db";
 import router from "./routes";
 import { logger } from "./lib/logger";
@@ -62,6 +63,20 @@ app.use(express.urlencoded({ extended: true, limit: "64kb" }));
 app.use("/api/auth", createAuthRouter(securityConfig, rateLimiter));
 app.use("/api", createApiAuthorizationMiddleware(securityConfig, rateLimiter));
 app.use("/api", router);
+
+if (securityConfig.mode === "production") {
+  const frontendRoot = fileURLToPath(new URL("../../cascade/dist/public/", import.meta.url));
+  app.use(express.static(frontendRoot, { index: false }));
+  app.get("/{*path}", (req, res, next) => {
+    if (req.path === "/api" || req.path.startsWith("/api/")) {
+      next();
+      return;
+    }
+    res.sendFile("index.html", { root: frontendRoot }, (error) => {
+      if (error) next(error);
+    });
+  });
+}
 
 app.use((error: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (res.headersSent) {
