@@ -134,7 +134,14 @@ async function createBrowserSession(baseUrl: string) {
     body: JSON.stringify({ password: testConfig.webPassword }),
   });
   assert.equal(response.status, 200);
-  const cookie = response.headers.get("set-cookie")?.split(";")[0];
+  const setCookie = response.headers.get("set-cookie");
+  assert.ok(setCookie);
+  assert.match(setCookie, /;\s*HttpOnly(?:;|$)/i);
+  assert.match(setCookie, /;\s*Path=\/api(?:;|$)/i);
+  assert.match(setCookie, /;\s*SameSite=Strict(?:;|$)/i);
+  assert.match(setCookie, /;\s*Secure(?:;|$)/i);
+  assert.match(setCookie, /;\s*Max-Age=21600(?:;|$)/i);
+  const cookie = setCookie.split(";")[0];
   assert.ok(cookie);
   const session = await response.json() as { authenticated: boolean; csrfToken: string };
   assert.equal(session.authenticated, true);
@@ -168,6 +175,30 @@ test("production startup configuration fails closed without distinct required se
       CASCADE_TRUST_PROXY_HOPS: "1",
     }),
     /must be distinct/,
+  );
+  assert.throws(
+    () => loadSecurityConfig({
+      NODE_ENV: "production",
+      CASCADE_AUTH_MODE: "production",
+      CASCADE_WEB_PASSWORD: "test-password-long-enough",
+      CASCADE_SESSION_SECRET: "test-session-secret-long-enough-to-pass-32-bytes",
+      CASCADE_MCP_BEARER_TOKEN: "test-mcp-token-long-enough-to-pass-32-bytes",
+      CASCADE_ALLOWED_ORIGINS: "https://demo.example/path",
+      CASCADE_TRUST_PROXY_HOPS: "1",
+    }),
+    /origin values only/,
+  );
+  assert.throws(
+    () => loadSecurityConfig({
+      NODE_ENV: "production",
+      CASCADE_AUTH_MODE: "production",
+      CASCADE_WEB_PASSWORD: "test-password-long-enough",
+      CASCADE_SESSION_SECRET: "test-session-secret-long-enough-to-pass-32-bytes",
+      CASCADE_MCP_BEARER_TOKEN: "test-mcp-token-long-enough-to-pass-32-bytes",
+      CASCADE_ALLOWED_ORIGINS: origin,
+      CASCADE_TRUST_PROXY_HOPS: "6",
+    }),
+    /integer from 0 to 5/,
   );
 });
 
@@ -321,6 +352,36 @@ test("API POST requests are rate limited", async () => {
     assert.equal(limited.status, 429);
     assert.equal(limited.headers.get("retry-after"), "60");
   });
+});
+
+test("login attempts are rate limited", async () => {
+  await withServer(securityTestApp(), async (baseUrl) => {
+    for (let index = 0; index < 5; index += 1) {
+      const response = await fetch(`${baseUrl}/api/auth/session`, {
+        method: "POST",
+        headers: { origin, "content-type": "application/json" },
+        body: JSON.stringify({ password: "incorrect-password" }),
+      });
+      assert.equal(response.status, 401);
+    }
+
+    const limited = await fetch(`${baseUrl}/api/auth/session`, {
+      method: "POST",
+      headers: { origin, "content-type": "application/json" },
+      body: JSON.stringify({ password: "incorrect-password" }),
+    });
+    assert.equal(limited.status, 429);
+    assert.equal(limited.headers.get("retry-after"), "900");
+  });
+});
+
+test("rate limiter bounds buckets and reclaims expired entries", () => {
+  const limiter = new FixedWindowRateLimiter();
+  for (let index = 0; index < 10_000; index += 1) {
+    assert.equal(limiter.consume(`client-${index}`, 1, 60_000, 0), true);
+  }
+  assert.equal(limiter.consume("client-over-capacity", 1, 60_000, 0), false);
+  assert.equal(limiter.consume("client-after-expiry", 1, 60_000, 60_000), true);
 });
 
 test("liveness remains available and readiness reflects database availability", async () => {

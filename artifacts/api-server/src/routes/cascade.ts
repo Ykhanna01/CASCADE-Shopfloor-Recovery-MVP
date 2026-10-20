@@ -20,6 +20,7 @@ import { dispatchCascadeTool } from "../lib/cascade/tools";
 import { readShopState } from "../lib/cascade/store";
 
 const router: IRouter = Router();
+const INVALID_REQUEST_MESSAGE = "Invalid request input.";
 
 function reportError(
   req: Request,
@@ -59,7 +60,7 @@ router.get("/cascade/actions", async (req, res): Promise<void> => {
 router.post("/cascade/disruptions", async (req, res): Promise<void> => {
   const input = SimulateDisruptionBody.safeParse(req.body);
   if (!input.success) {
-    res.status(400).json({ error: input.error.message });
+    res.status(400).json({ error: INVALID_REQUEST_MESSAGE });
     return;
   }
   try {
@@ -82,7 +83,7 @@ router.post("/cascade/impact", async (req, res): Promise<void> => {
 router.post("/cascade/recovery-plans", async (req, res): Promise<void> => {
   const input = ProposeRecoveryBody.safeParse(req.body);
   if (!input.success) {
-    res.status(400).json({ error: input.error.message });
+    res.status(400).json({ error: INVALID_REQUEST_MESSAGE });
     return;
   }
   try {
@@ -98,7 +99,7 @@ router.post(
   async (req, res): Promise<void> => {
     const params = ApproveRecoveryParams.safeParse(req.params);
     if (!params.success) {
-      res.status(400).json({ error: params.error.message });
+      res.status(400).json({ error: INVALID_REQUEST_MESSAGE });
       return;
     }
     try {
@@ -115,12 +116,12 @@ router.post(
   async (req, res): Promise<void> => {
     const params = ExecuteRecoveryParams.safeParse(req.params);
     if (!params.success) {
-      res.status(400).json({ error: params.error.message });
+      res.status(400).json({ error: INVALID_REQUEST_MESSAGE });
       return;
     }
     const input = ExecuteRecoveryBody.safeParse(req.body);
     if (!input.success) {
-      res.status(400).json({ error: input.error.message });
+      res.status(400).json({ error: INVALID_REQUEST_MESSAGE });
       return;
     }
     try {
@@ -140,7 +141,7 @@ router.post(
   async (req, res): Promise<void> => {
     const params = VerifyRecoveryParams.safeParse(req.params);
     if (!params.success) {
-      res.status(400).json({ error: params.error.message });
+      res.status(400).json({ error: INVALID_REQUEST_MESSAGE });
       return;
     }
     try {

@@ -5,7 +5,10 @@ packages:
   - scripts
 
 allowBuilds:
-  esbuild: set this to true or false
+  '@swc/core': true
+  esbuild: true
+  msw: true
+  unrs-resolver: true
 
 autoInstallPeers: false
 
@@ -33,12 +36,6 @@ catalog:
 minimumReleaseAge: 1440
 
 minimumReleaseAgeExclude:
-onlyBuiltDependencies:
-  - '@swc/core'
-  - esbuild
-  - msw
-  - unrs-resolver
-
 overrides:
   '@esbuild-kit/esm-loader': npm:tsx@^4.21.0
   '@expo/ngrok-bin>@expo/ngrok-bin-darwin-arm64': '-'

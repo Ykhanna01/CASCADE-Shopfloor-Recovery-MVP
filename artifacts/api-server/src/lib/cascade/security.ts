@@ -19,22 +19,26 @@ interface BrowserSession {
 
 const SESSION_COOKIE = "cascade_session";
 const SESSION_TTL_SECONDS = 6 * 60 * 60;
+const MAX_RATE_LIMIT_BUCKETS = 10_000;
 const MAX_REQUESTS_PER_MINUTE = 60;
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 
 export class FixedWindowRateLimiter {
   private readonly buckets = new Map<string, { count: number; expiresAt: number }>();
+  private nextCleanupAt = 0;
 
   consume(key: string, limit: number, windowMs: number, now = Date.now()): boolean {
-    if (this.buckets.size > 10_000) {
+    if (this.buckets.size >= MAX_RATE_LIMIT_BUCKETS && now >= this.nextCleanupAt) {
       for (const [bucketKey, bucket] of this.buckets) {
         if (bucket.expiresAt <= now) this.buckets.delete(bucketKey);
       }
+      this.nextCleanupAt = now + 1_000;
     }
 
     const bucket = this.buckets.get(key);
     if (!bucket || bucket.expiresAt <= now) {
+      if (this.buckets.size >= MAX_RATE_LIMIT_BUCKETS) return false;
       this.buckets.set(key, { count: 1, expiresAt: now + windowMs });
       return true;
     }
