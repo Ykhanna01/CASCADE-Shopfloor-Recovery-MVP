@@ -54,7 +54,7 @@ app.use(cors({
   },
   credentials: true,
   methods: ["GET", "POST", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-CSRF-Token", "MCP-Protocol-Version", "Accept", "Last-Event-ID"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-CSRF-Token", "X-Cascade-Scenario-ID", "MCP-Protocol-Version", "Accept", "Last-Event-ID"],
   exposedHeaders: ["MCP-Protocol-Version", "Mcp-Session-Id"],
 }));
 app.use(express.json({ limit: "64kb" }));

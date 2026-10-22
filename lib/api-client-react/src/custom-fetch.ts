@@ -7,6 +7,7 @@ export type ErrorType<T = unknown> = ApiError<T>;
 export type BodyType<T> = T;
 
 export type AuthTokenGetter = () => Promise<string | null> | string | null;
+export type ScenarioIdGetter = () => string | null;
 
 const NO_BODY_STATUS = new Set([204, 205, 304]);
 const DEFAULT_JSON_ACCEPT = "application/json, application/problem+json";
@@ -18,6 +19,7 @@ const DEFAULT_JSON_ACCEPT = "application/json, application/problem+json";
 let _baseUrl: string | null = null;
 let _authTokenGetter: AuthTokenGetter | null = null;
 let _csrfToken: string | null = null;
+let _scenarioIdGetter: ScenarioIdGetter | null = null;
 
 /**
  * Set a base URL that is prepended to every relative request URL
@@ -47,6 +49,10 @@ export function setAuthTokenGetter(getter: AuthTokenGetter | null): void {
 
 export function setCsrfToken(token: string | null): void {
   _csrfToken = token;
+}
+
+export function setScenarioIdGetter(getter: ScenarioIdGetter | null): void {
+  _scenarioIdGetter = getter;
 }
 
 function isRequest(input: RequestInfo | URL): input is Request {
@@ -344,6 +350,11 @@ export async function customFetch<T = unknown>(
 
   if (_csrfToken && method !== "GET" && method !== "HEAD" && !headers.has("x-csrf-token")) {
     headers.set("x-csrf-token", _csrfToken);
+  }
+
+  if (_scenarioIdGetter && !headers.has("x-cascade-scenario-id")) {
+    const scenarioId = _scenarioIdGetter();
+    if (scenarioId) headers.set("x-cascade-scenario-id", scenarioId);
   }
 
   if (

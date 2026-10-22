@@ -287,7 +287,8 @@ export function createOriginGuard(config: SecurityConfig) {
 
 function isStateChangingRestRequest(request: Request): boolean {
   if (request.method !== "POST") return false;
-  return request.path === "/cascade/disruptions" ||
+  return request.path === "/cascade/scenarios" ||
+    request.path === "/cascade/disruptions" ||
     request.path === "/cascade/recovery-plans" ||
     /^\/cascade\/recovery-plans\/[^/]+\/(?:approve|execute|verify)$/.test(request.path);
 }

@@ -12,16 +12,56 @@ import {
   useGetShopState, useHealthCheck, useProposeRecovery, useSimulateDisruption,
   useVerifyRecovery,
 } from '@workspace/api-client-react';
-import { setCsrfToken } from '@workspace/api-client-react';
-import type { ActionEvent, ImpactAnalysis, RecoveryPlan, VerificationResult } from '@workspace/api-client-react';
+import { customFetch, setCsrfToken, setScenarioIdGetter } from '@workspace/api-client-react';
+import type { ActionEvent, ImpactAnalysis, RecoveryPlan, ShopState, VerificationResult } from '@workspace/api-client-react';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import NotFound from '@/pages/not-found';
 import { Route, Switch, useLocation, Router as WouterRouter } from 'wouter';
+import { refetchAll, refreshWorkspaceState } from './workspace-refresh.mjs';
 
 const queryClient = new QueryClient();
 const DEMO_PROMPT = 'Our plywood shipment is delayed by two days. Can we still deliver the Palmer order on Friday without making our other customers late?';
+const SCENARIO_STORAGE_KEY = 'cascade-active-scenario-id';
+
+let activeScenarioId: string | null = null;
+try {
+  activeScenarioId = window.sessionStorage.getItem(SCENARIO_STORAGE_KEY)
+    ?? window.localStorage.getItem(SCENARIO_STORAGE_KEY);
+} catch {
+  try {
+    activeScenarioId = window.localStorage.getItem(SCENARIO_STORAGE_KEY);
+  } catch {
+    activeScenarioId = null;
+  }
+}
+activeScenarioId ??= new URLSearchParams(window.location.search).get('cascadeScenario');
+setScenarioIdGetter(() => activeScenarioId);
+
+function saveActiveScenarioId(scenarioId: string): boolean {
+  activeScenarioId = scenarioId;
+  let stored = false;
+  try {
+    window.sessionStorage.setItem(SCENARIO_STORAGE_KEY, scenarioId);
+    stored = true;
+  } catch {
+    try {
+      window.localStorage.setItem(SCENARIO_STORAGE_KEY, scenarioId);
+      stored = true;
+    } catch {
+      stored = false;
+    }
+  }
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.set('cascadeScenario', scenarioId);
+    window.history.replaceState(null, '', url);
+    return true;
+  } catch {
+    return stored;
+  }
+}
 
 function Status({ children, tone = 'neutral' }: { children: ReactNode; tone?: 'good' | 'warn' | 'bad' | 'neutral' }) {
   const colors = {
@@ -111,6 +151,12 @@ function Home() {
   const [showHistory, setShowHistory] = useState(false);
   const [notice, setNotice] = useState('');
   const [voiceListening, setVoiceListening] = useState(false);
+  const [refreshPending, setRefreshPending] = useState(false);
+  const [newDemoPending, setNewDemoPending] = useState(false);
+  const [workspaceError, setWorkspaceError] = useState('');
+  const refreshInFlight = useRef(false);
+  const newDemoInFlight = useRef(false);
+  const newDemoRequestId = useRef('');
   const analyzedDisruptionId = useRef('');
   const restoredVerificationPlanId = useRef('');
 
@@ -147,16 +193,95 @@ function Home() {
   const recoveredMaterial = materials.find((material) => material.id === activeDisruption?.materialId);
   const selectedMaterial = materials.find((material) => material.id === selectedMaterialId);
   const anyPending = simulateMutation.isPending || analyzeMutation.isPending || proposeMutation.isPending ||
-    approveMutation.isPending || executeMutation.isPending || verifyMutation.isPending;
+    approveMutation.isPending || executeMutation.isPending || verifyMutation.isPending ||
+    refreshPending || newDemoPending;
   const firstError = shop.error || history.error || simulateMutation.error || analyzeMutation.error ||
     proposeMutation.error || approveMutation.error || executeMutation.error || verifyMutation.error;
 
-  const refreshWorkspace = () => {
-    void queryClient.invalidateQueries({ queryKey: getGetShopStateQueryKey() });
-    void queryClient.invalidateQueries({ queryKey: getGetActionHistoryQueryKey() });
-    void queryClient.invalidateQueries({ queryKey: getHealthCheckQueryKey() });
+  const refreshWorkspace = () => refreshWorkspaceState({
+    inFlight: refreshInFlight,
+    setLoading: setRefreshPending,
+    setError: setWorkspaceError,
+    refetch: async () => {
+      const results = await refetchAll([
+        () => shop.refetch({ throwOnError: true }),
+        () => history.refetch({ throwOnError: true }),
+        () => health.refetch({ throwOnError: true }),
+      ] as const);
+      const failedResult = results.find((result) => result.isError);
+      if (failedResult?.isError) throw failedResult.error;
+      const refreshedState = results[0]?.data;
+      if (!refreshedState) throw new Error('The API returned no workshop state.');
+
+      setAlternatives([]);
+      setActivePlanId('');
+      setVerification(null);
+      restoredVerificationPlanId.current = '';
+      const disruptionId = refreshedState.disruption?.id ?? '';
+      analyzedDisruptionId.current = disruptionId;
+      if (disruptionId) {
+        const refreshedImpact = await analyzeMutation.mutateAsync();
+        setImpact(refreshedImpact);
+      } else {
+        setImpact(null);
+      }
+    },
+  });
+
+  const startNewDemo = async () => {
+    if (newDemoInFlight.current) return;
+    newDemoInFlight.current = true;
+    setNewDemoPending(true);
+    setWorkspaceError('');
+    setNotice('');
+    if (!newDemoRequestId.current) newDemoRequestId.current = window.crypto.randomUUID();
+    try {
+      const created = await customFetch<{ scenarioId: string; state: ShopState }>(
+        '/api/cascade/scenarios',
+        {
+          method: 'POST',
+          body: JSON.stringify({ requestId: newDemoRequestId.current }),
+        },
+      );
+      const scenarioStored = saveActiveScenarioId(created.scenarioId);
+      queryClient.setQueryData(getGetShopStateQueryKey(), created.state);
+      queryClient.setQueryData(getGetActionHistoryQueryKey(), []);
+      simulateMutation.reset();
+      analyzeMutation.reset();
+      proposeMutation.reset();
+      approveMutation.reset();
+      executeMutation.reset();
+      verifyMutation.reset();
+      setScenarioText(DEMO_PROMPT);
+      setMaterialId('');
+      setDelayDays('2');
+      setImpact(null);
+      setAlternatives([]);
+      setActivePlanId('');
+      setTargetOrderId('PAL-204');
+      setVerification(null);
+      setConfirmExecuteId('');
+      setExecutionAcknowledged(false);
+      analyzedDisruptionId.current = '';
+      restoredVerificationPlanId.current = '';
+      const refreshed = await refetchAll([
+        () => shop.refetch({ throwOnError: true }),
+        () => history.refetch({ throwOnError: true }),
+      ] as const);
+      const failedResult = refreshed.find((result) => result.isError);
+      if (failedResult?.isError) throw failedResult.error;
+      newDemoRequestId.current = '';
+      setNotice(scenarioStored
+        ? 'A fresh simulated demo started. The previous run and its audit history were preserved.'
+        : 'A fresh simulated demo is active for this tab only because browser storage and URL persistence were unavailable.');
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : 'Unable to start a new demo.');
+    } finally {
+      newDemoInFlight.current = false;
+      setNewDemoPending(false);
+    }
   };
-  const errorText = firstError instanceof Error ? firstError.message : firstError ? 'The service could not complete that request.' : '';
+  const errorText = workspaceError || (firstError instanceof Error ? firstError.message : firstError ? 'The service could not complete that request.' : '');
 
   useEffect(() => {
     if (!authSession.checked || (authSession.required && !authSession.authenticated)) return;
@@ -368,7 +493,8 @@ function Home() {
         </div>
         <div className="flex flex-wrap items-center gap-2 lg:justify-end">
           <div className="flex min-h-10 items-center gap-2 border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-3 text-xs text-muted-foreground"><span className={`h-2 w-2 rounded-full ${health.data?.status === 'ok' || health.data?.status === 'healthy' ? 'bg-emerald-600' : 'bg-amber-500'}`} /><span>API {health.data?.status ?? 'checking'}</span></div>
-          <Button kind="secondary" testId="button-refresh-workspace" onClick={refreshWorkspace}><RefreshCw size={14} /> Refresh data</Button>
+          <Button kind="secondary" testId="button-refresh-workspace" disabled={anyPending} onClick={() => { void refreshWorkspace(); }}><RefreshCw size={14} className={refreshPending ? 'animate-spin' : ''} /> {refreshPending ? 'Refreshing' : 'Refresh data'}</Button>
+          <Button kind="primary" testId="button-new-demo" disabled={anyPending} onClick={() => { void startNewDemo(); }}><RefreshCw size={14} className={newDemoPending ? 'animate-spin' : ''} /> {newDemoPending ? 'Starting demo' : 'New demo'}</Button>
         </div>
       </section>
 
@@ -393,7 +519,7 @@ function Home() {
       </ol>
 
       {errorText && <div role="alert" data-testid="status-request-error" className="mb-4 flex items-center justify-between gap-3 rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
-        <span><strong>Request did not complete.</strong> {errorText}</span><Button kind="quiet" testId="button-dismiss-error" onClick={() => { simulateMutation.reset(); analyzeMutation.reset(); proposeMutation.reset(); approveMutation.reset(); executeMutation.reset(); verifyMutation.reset(); }}><X size={15} /> Dismiss</Button>
+        <span><strong>Request did not complete.</strong> {errorText}</span><Button kind="quiet" testId="button-dismiss-error" onClick={() => { setWorkspaceError(''); simulateMutation.reset(); analyzeMutation.reset(); proposeMutation.reset(); approveMutation.reset(); executeMutation.reset(); verifyMutation.reset(); }}><X size={15} /> Dismiss</Button>
       </div>}
       {notice && <div role="status" data-testid="status-action-notice" className="mb-4 flex items-center justify-between rounded-md border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-sm text-emerald-900"><span className="flex items-center gap-2"><CheckCircle2 size={16} />{notice}</span><button aria-label="Dismiss message" data-testid="button-dismiss-notice" onClick={() => setNotice('')}><X size={15} /></button></div>}
 

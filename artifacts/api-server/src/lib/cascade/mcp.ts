@@ -7,6 +7,11 @@ import { DomainError } from "./domain";
 import {
   dispatchCascadeTool,
 } from "./tools";
+import {
+  cascadeStateStore,
+  normalizeScenarioId,
+  type CascadeStateStore,
+} from "./store";
 import { toolInputSchemas } from "./tool-contracts";
 
 export const CASCADE_MCP_PROTOCOL_VERSION = "2025-11-25";
@@ -17,7 +22,10 @@ if (LATEST_PROTOCOL_VERSION !== CASCADE_MCP_PROTOCOL_VERSION) {
   );
 }
 
-function createMcpServer(): McpServer {
+function createMcpServer(
+  scenarioId: string,
+  store: CascadeStateStore,
+): McpServer {
   const server = new McpServer(
     { name: "cascade-shopfloor-recovery", version: "1.0.0" },
     { capabilities: { tools: { listChanged: false } } },
@@ -31,7 +39,9 @@ function createMcpServer(): McpServer {
         "Read the current fictional workshop orders, inventory, machines, schedule, and recovery plans. Data is simulated.",
     },
     async () =>
-      runTool("get_shop_state", () => dispatchCascadeTool("get_shop_state")),
+      runTool("get_shop_state", () =>
+        dispatchCascadeTool("get_shop_state", {}, scenarioId, store),
+      ),
   );
   server.registerTool(
     "simulate_disruption",
@@ -46,7 +56,7 @@ function createMcpServer(): McpServer {
     },
     async (args) =>
       runTool("simulate_disruption", () =>
-        dispatchCascadeTool("simulate_disruption", args),
+        dispatchCascadeTool("simulate_disruption", args, scenarioId, store),
       ),
   );
   server.registerTool(
@@ -57,7 +67,9 @@ function createMcpServer(): McpServer {
         "Analyze orders and dependent production tasks exposed to the active simulated supplier delay.",
     },
     async () =>
-      runTool("analyze_impact", () => dispatchCascadeTool("analyze_impact")),
+      runTool("analyze_impact", () =>
+        dispatchCascadeTool("analyze_impact", {}, scenarioId, store),
+      ),
   );
   server.registerTool(
     "propose_recovery",
@@ -71,7 +83,7 @@ function createMcpServer(): McpServer {
     },
     async (args) =>
       runTool("propose_recovery", () =>
-        dispatchCascadeTool("propose_recovery", args),
+        dispatchCascadeTool("propose_recovery", args, scenarioId, store),
       ),
   );
   server.registerTool(
@@ -86,7 +98,7 @@ function createMcpServer(): McpServer {
     },
     async (args) =>
       runTool("approve_recovery", () =>
-        dispatchCascadeTool("approve_recovery", args),
+        dispatchCascadeTool("approve_recovery", args, scenarioId, store),
       ),
   );
   server.registerTool(
@@ -102,7 +114,7 @@ function createMcpServer(): McpServer {
     },
     async (args) =>
       runTool("execute_recovery", () =>
-        dispatchCascadeTool("execute_recovery", args),
+        dispatchCascadeTool("execute_recovery", args, scenarioId, store),
       ),
   );
   server.registerTool(
@@ -117,7 +129,7 @@ function createMcpServer(): McpServer {
     },
     async (args) =>
       runTool("verify_recovery", () =>
-        dispatchCascadeTool("verify_recovery", args),
+        dispatchCascadeTool("verify_recovery", args, scenarioId, store),
       ),
   );
   server.registerTool(
@@ -129,7 +141,12 @@ function createMcpServer(): McpServer {
     },
     async () => {
       return runTool("get_action_history", async () => {
-        const actions = await dispatchCascadeTool("get_action_history");
+        const actions = await dispatchCascadeTool(
+          "get_action_history",
+          {},
+          scenarioId,
+          store,
+        );
         return { actions };
       });
     },
@@ -175,8 +192,18 @@ async function runTool(
 export async function handleMcpRequest(
   req: Request,
   res: Response,
+  store: CascadeStateStore = cascadeStateStore,
 ): Promise<void> {
-  const server = createMcpServer();
+  let scenarioId: string;
+  try {
+    scenarioId = normalizeScenarioId(req.get("x-cascade-scenario-id"));
+  } catch (error) {
+    res.status(error instanceof DomainError ? error.statusCode : 400).json({
+      error: error instanceof DomainError ? error.message : "Invalid scenario ID.",
+    });
+    return;
+  }
+  const server = createMcpServer(scenarioId, store);
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,

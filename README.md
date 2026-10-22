@@ -9,7 +9,7 @@ CASCADE is a hackathon MVP for small custom-production workshops. It models a su
 - `artifacts/cascade/` contains the React/Vite dashboard. It calls typed REST routes; browser speech capture, when supported, only fills the scenario note.
 - `artifacts/api-server/src/routes/cascade.ts` exposes the browser API, while `src/routes/mcp.ts` mounts the MCP endpoint at `/api/mcp`.
 - `artifacts/api-server/src/lib/cascade/tools.ts` dispatches MCP and REST operations to shared domain logic in `domain.ts`.
-- `artifacts/api-server/src/lib/cascade/store.ts` persists simulated workshop state and action history in the PostgreSQL `cascade_state` JSONB row with ID `northstar-demo`.
+- `artifacts/api-server/src/lib/cascade/store.ts` persists simulated workshop state and action history in PostgreSQL `cascade_state` JSONB rows. The legacy `northstar-demo` row remains readable; each explicit New demo creates a separate `demo-<request-UUID>` row.
 - The MCP server uses the official TypeScript SDK and stateless Streamable HTTP. It is an MCP interface, not an Alexa+ skill or Alexa+ account/device integration.
 
 All names, orders, suppliers, inventory, schedules, costs, and events are fictional. Supplier names and availability are scenario inputs, not live quotes or supplier connections. No supplier, customer, Alexa service, or production system is contacted.
@@ -40,7 +40,11 @@ PORT=5173 BASE_PATH=/ API_PROXY_TARGET=http://127.0.0.1:5000 pnpm --filter @work
 
 The API `dev` script sets development auth mode, builds the API, then starts it. Vite requires both `PORT` and `BASE_PATH`; its API proxy defaults to `http://127.0.0.1:5000`.
 
-The store creates `northstar-demo` only if that row is absent. It does not reseed, reset, or upgrade an existing scenario. The current date-based seed therefore applies only to a newly initialized row. If an existing local or deployed row contains older dates or actions, do not delete or overwrite it casually; use a separate empty demo database, or obtain explicit approval for a reviewed refresh procedure that preserves existing data and audit history.
+Refresh data re-fetches the currently selected server state, action history, and health status; it does not reset or create a demo. New demo is a separate authenticated action that creates a fresh, isolated scenario with dates based on the current workweek. Scenario creation is idempotent for retries of the same request ID. Existing `northstar-demo` and earlier demo rows are not overwritten or deleted, and their audit history remains stored. Scenario selection is kept in the current browser tab's session storage. The existing text-key/JSONB table supports scenario rows without a schema migration.
+
+An existing deployment may still open the legacy `northstar-demo` row with stale dates until an authorized user explicitly starts a New demo. That action adds a fresh row; it does not repair or erase old state.
+
+The scenario API and stateless MCP endpoint accept `X-Cascade-Scenario-ID` to scope reads and workflow mutations to a demo row. Missing headers continue to use `northstar-demo` for backward compatibility. Browser state-changing calls, including New demo creation, retain the production session and CSRF checks; MCP mutations retain bearer-token authorization.
 
 ## MCP endpoint
 

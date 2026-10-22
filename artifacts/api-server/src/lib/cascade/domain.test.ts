@@ -140,6 +140,47 @@ test("demo planning dates follow the current workweek and preserve the Friday de
   assert.equal(disrupted.disruption?.revisedArrivalDate, palletOrder.dueDate);
 });
 
+test("fresh October 22 demo exposes plywood dependencies and recovery forecasts agree", () => {
+  const scenarioNow = new Date("2026-10-22T12:00:00.000Z");
+  const initial = createInitialState(scenarioNow);
+  const disrupted = simulateDisruption(initial, "plywood", 2, scenarioNow);
+  const impact = analyzeImpact(disrupted);
+  const { state: proposedState, plans } = proposeRecovery(
+    disrupted,
+    "PAL-204",
+    scenarioNow,
+  );
+
+  assert.equal(initial.orders.find((order) => order.id === "PAL-204")?.dueDate, "2026-10-23");
+  assert.equal(disrupted.disruption?.originalArrivalDate, "2026-10-21");
+  assert.equal(disrupted.disruption?.revisedArrivalDate, "2026-10-23");
+  assert.equal(impact.affectedOrderIds.length, 5);
+  assert.equal(impact.affectedTaskIds.length, 15);
+  assert.equal(plans.length, 3);
+  assert.deepEqual(
+    plans.map(({ cost, onTimeOrders, lateOrders, feasible }) => ({
+      cost,
+      onTimeOrders,
+      lateOrders,
+      feasible,
+    })),
+    [
+      { cost: 520, onTimeOrders: 8, lateOrders: 0, feasible: true },
+      { cost: 310, onTimeOrders: 6, lateOrders: 2, feasible: true },
+      { cost: 300, onTimeOrders: 5, lateOrders: 3, feasible: false },
+    ],
+  );
+  assert.ok(plans[2]?.risks.some((risk) => risk.includes("Hard target deadline missed")));
+
+  const recommended = plans.find((plan) => plan.feasible)!;
+  const approved = approveRecovery(proposedState, recommended.id, scenarioNow);
+  const executed = executeRecovery(approved, recommended.id, "october-22-demo", scenarioNow);
+  const verified = verifyRecovery(executed, recommended.id, scenarioNow);
+  assert.equal(verified.result.verified, true);
+  assert.equal(verified.result.onTimeOrders, recommended.onTimeOrders);
+  assert.equal(verified.result.lateOrders, recommended.lateOrders);
+});
+
 test("tool input schemas accept a valid delay and reject invalid values", () => {
   assert.equal(
     toolInputSchemas.simulate_disruption.safeParse({

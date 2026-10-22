@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import express, { type Express } from "express";
+import express, { type Express, type IRouter } from "express";
 import { once } from "node:events";
 import test from "node:test";
 import { SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/sdk/types.js";
-import mcpRouter from "../../routes/mcp";
+import mcpRouter, { createMcpRouter } from "../../routes/mcp";
+import { createInitialState, type PersistedShopState } from "./domain";
 import {
   CASCADE_MCP_PROTOCOL_VERSION,
 } from "./mcp";
@@ -13,6 +14,7 @@ import {
   FixedWindowRateLimiter,
   type SecurityConfig,
 } from "./security";
+import type { CascadeStateStore } from "./store";
 
 const bearerToken = "mcp-integration-test-token";
 const testConfig: SecurityConfig = {
@@ -24,6 +26,7 @@ const testConfig: SecurityConfig = {
 
 async function withMcpServer<T>(
   action: (baseUrl: string) => Promise<T>,
+  route: IRouter = mcpRouter,
 ): Promise<T> {
   const app: Express = express();
   app.use(express.json({ limit: "64kb" }));
@@ -31,7 +34,7 @@ async function withMcpServer<T>(
     testConfig,
     new FixedWindowRateLimiter(),
   ));
-  app.use("/api", mcpRouter);
+  app.use("/api", route);
 
   const server = createServer(app);
   server.listen(0, "127.0.0.1");
@@ -89,6 +92,7 @@ test("actual MCP endpoint authenticates and exposes the registered tools", async
         },
       }),
     });
+
     assert.equal(unauthenticated.status, 401);
 
     assert.ok(SUPPORTED_PROTOCOL_VERSIONS.includes(CASCADE_MCP_PROTOCOL_VERSION));
@@ -140,4 +144,86 @@ test("actual MCP endpoint authenticates and exposes the registered tools", async
       /invalid arguments/i,
     );
   });
+});
+
+test("MCP tools use an explicit scenario header and default to the legacy scenario", async () => {
+  const states = new Map<string, PersistedShopState>([
+    ["northstar-demo", createInitialState(new Date("2026-10-22T12:00:00.000Z"))],
+    [
+      "demo-f101b516-9117-4f1c-a81a-000000000001",
+      createInitialState(new Date("2026-10-22T12:00:00.000Z")),
+    ],
+  ]);
+  const readScenarioIds: string[] = [];
+  const store: CascadeStateStore = {
+    async readShopState(scenarioId = "northstar-demo") {
+      readScenarioIds.push(scenarioId);
+      const state = states.get(scenarioId);
+      assert.ok(state);
+      return state;
+    },
+    async mutateShopState(operation, scenarioId = "northstar-demo") {
+      const state = states.get(scenarioId);
+      assert.ok(state);
+      const { state: next, result } = operation(
+        state,
+        new Date("2026-10-22T12:00:00.000Z"),
+      );
+      states.set(scenarioId, next);
+      return result;
+    },
+    async createDemoScenario(requestId) {
+      const scenarioId = `demo-${requestId}`;
+      const state = createInitialState(new Date("2026-10-22T12:00:00.000Z"));
+      states.set(scenarioId, state);
+      return { scenarioId, state };
+    },
+  };
+
+  await withMcpServer(async (baseUrl) => {
+    const callTool = (id: number, scenarioId?: string) =>
+      fetch(`${baseUrl}/api/mcp`, {
+        method: "POST",
+        headers: {
+          accept: "application/json, text/event-stream",
+          authorization: `Bearer ${bearerToken}`,
+          "content-type": "application/json",
+          "mcp-protocol-version": CASCADE_MCP_PROTOCOL_VERSION,
+          ...(scenarioId ? { "x-cascade-scenario-id": scenarioId } : {}),
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id,
+          method: "tools/call",
+          params: { name: "get_shop_state", arguments: {} },
+        }),
+      });
+
+    const selectedScenario = "demo-f101b516-9117-4f1c-a81a-000000000001";
+    const selectedResponse = await callTool(10, selectedScenario);
+    assert.equal(selectedResponse.status, 200);
+    assert.ok(readScenarioIds.includes(selectedScenario));
+
+    const legacyResponse = await callTool(11);
+    assert.equal(legacyResponse.status, 200);
+    assert.ok(readScenarioIds.includes("northstar-demo"));
+
+    const invalidResponse = await fetch(`${baseUrl}/api/mcp`, {
+      method: "POST",
+      headers: {
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${bearerToken}`,
+        "content-type": "application/json",
+        "mcp-protocol-version": CASCADE_MCP_PROTOCOL_VERSION,
+        "x-cascade-scenario-id": "../northstar-demo",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 12,
+        method: "tools/call",
+        params: { name: "get_shop_state", arguments: {} },
+      }),
+    });
+    assert.equal(invalidResponse.status, 400);
+  }, createMcpRouter(store));
 });
