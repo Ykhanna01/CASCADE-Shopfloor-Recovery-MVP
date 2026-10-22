@@ -152,6 +152,37 @@ export class DomainError extends Error {
 }
 
 const DEMO_LABEL = "SIMULATED DEMO DATA";
+const TEMPLATE_SCENARIO_START = "2026-10-12";
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function scenarioDate(templateDate: string, now: Date): string {
+  const start = new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate(),
+  ));
+  const weekday = start.getUTCDay();
+  start.setUTCDate(start.getUTCDate() + (
+    weekday === 0 ? 1 : weekday === 6 ? 2 : 1 - weekday
+  ));
+
+  const templateOffset = Math.round(
+    (Date.parse(`${templateDate}T00:00:00.000Z`) -
+      Date.parse(`${TEMPLATE_SCENARIO_START}T00:00:00.000Z`)) /
+      DAY_MS,
+  );
+  start.setUTCDate(start.getUTCDate() + templateOffset);
+  return start.toISOString().slice(0, 10);
+}
+
+function formatScenarioDate(value: string): string {
+  return new Intl.DateTimeFormat("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(`${value}T12:00:00.000Z`));
+}
 
 function task(
   id: string,
@@ -179,8 +210,10 @@ function task(
 }
 
 export function createInitialState(now = new Date()): PersistedShopState {
+  const date = (templateDate: string) => scenarioDate(templateDate, now);
+  const planningStart = formatScenarioDate(date(TEMPLATE_SCENARIO_START));
   return {
-    scenarioName: "Northstar Custom Works — Week of October 12",
+    scenarioName: `Northstar Custom Works — planning horizon from ${planningStart}`,
     simulationLabel: DEMO_LABEL,
     lastUpdated: now.toISOString(),
     disruption: null,
@@ -190,7 +223,7 @@ export function createInitialState(now = new Date()): PersistedShopState {
         customer: "Palmer",
         product: "Walnut dining table",
         quantity: 1,
-        dueDate: "2026-10-16",
+        dueDate: date("2026-10-16"),
         priority: "urgent",
         status: "on_track",
         taskIds: ["pal-cut", "pal-assemble", "pal-finish"],
@@ -200,7 +233,7 @@ export function createInitialState(now = new Date()): PersistedShopState {
         customer: "Brookside",
         product: "Built-in cabinet set",
         quantity: 2,
-        dueDate: "2026-10-16",
+        dueDate: date("2026-10-16"),
         priority: "high",
         status: "on_track",
         taskIds: ["brk-cut", "brk-assemble", "brk-finish"],
@@ -210,7 +243,7 @@ export function createInitialState(now = new Date()): PersistedShopState {
         customer: "Moreno",
         product: "Wall shelving",
         quantity: 3,
-        dueDate: "2026-10-19",
+        dueDate: date("2026-10-19"),
         priority: "standard",
         status: "on_track",
         taskIds: ["mor-cut", "mor-assemble", "mor-finish"],
@@ -220,7 +253,7 @@ export function createInitialState(now = new Date()): PersistedShopState {
         customer: "Ng",
         product: "Workbench",
         quantity: 1,
-        dueDate: "2026-10-20",
+        dueDate: date("2026-10-20"),
         priority: "high",
         status: "on_track",
         taskIds: ["ng-cut", "ng-assemble", "ng-finish"],
@@ -230,7 +263,7 @@ export function createInitialState(now = new Date()): PersistedShopState {
         customer: "Rivera",
         product: "Reception desk",
         quantity: 1,
-        dueDate: "2026-10-21",
+        dueDate: date("2026-10-21"),
         priority: "high",
         status: "on_track",
         taskIds: ["riv-cut", "riv-assemble", "riv-finish"],
@@ -240,7 +273,7 @@ export function createInitialState(now = new Date()): PersistedShopState {
         customer: "Lee",
         product: "Storage credenza",
         quantity: 1,
-        dueDate: "2026-10-19",
+        dueDate: date("2026-10-19"),
         priority: "standard",
         status: "on_track",
         taskIds: ["lee-cut", "lee-assemble", "lee-finish"],
@@ -250,7 +283,7 @@ export function createInitialState(now = new Date()): PersistedShopState {
         customer: "Das",
         product: "Pair of side tables",
         quantity: 2,
-        dueDate: "2026-10-20",
+        dueDate: date("2026-10-20"),
         priority: "standard",
         status: "on_track",
         taskIds: ["das-cut", "das-assemble", "das-finish"],
@@ -260,7 +293,7 @@ export function createInitialState(now = new Date()): PersistedShopState {
         customer: "Finch",
         product: "Retail display stands",
         quantity: 4,
-        dueDate: "2026-10-21",
+        dueDate: date("2026-10-21"),
         priority: "standard",
         status: "on_track",
         taskIds: ["fin-cut", "fin-assemble", "fin-finish"],
@@ -274,7 +307,7 @@ export function createInitialState(now = new Date()): PersistedShopState {
         available: 3,
         delayedShipment: 24,
         supplier: "Northline Timber",
-        scheduledArrival: "2026-10-14",
+        scheduledArrival: date("2026-10-14"),
         alternateSupplier: "Summit Materials",
         alternateAvailable: true,
         expediteCost: 520,
@@ -286,7 +319,7 @@ export function createInitialState(now = new Date()): PersistedShopState {
         available: 52,
         delayedShipment: 0,
         supplier: "Northline Timber",
-        scheduledArrival: "2026-10-12",
+        scheduledArrival: date("2026-10-12"),
         alternateSupplier: "Summit Materials",
         alternateAvailable: true,
         expediteCost: 120,
@@ -298,7 +331,7 @@ export function createInitialState(now = new Date()): PersistedShopState {
         available: 34,
         delayedShipment: 0,
         supplier: "Cedar Ridge Supply",
-        scheduledArrival: "2026-10-12",
+        scheduledArrival: date("2026-10-12"),
         alternateSupplier: "Summit Materials",
         alternateAvailable: true,
         expediteCost: 95,
@@ -310,7 +343,7 @@ export function createInitialState(now = new Date()): PersistedShopState {
         available: 12,
         delayedShipment: 0,
         supplier: "Cedar Ridge Supply",
-        scheduledArrival: "2026-10-12",
+        scheduledArrival: date("2026-10-12"),
         alternateSupplier: "Summit Materials",
         alternateAvailable: true,
         expediteCost: 85,
@@ -323,30 +356,30 @@ export function createInitialState(now = new Date()): PersistedShopState {
       { id: "cnc-router", name: "CNC router", hoursPerDay: 8 },
     ],
     tasks: [
-      task("pal-cut", "PAL-204", "Cut table panels", "panel-saw", "plywood", 4, 2, [], "2026-10-14"),
-      task("pal-assemble", "PAL-204", "Assemble table", "assembly-bay", "plywood", 0, 2.5, ["pal-cut"], "2026-10-15"),
-      task("pal-finish", "PAL-204", "Sand and finish", "finish-booth", "plywood", 0, 2, ["pal-assemble"], "2026-10-16"),
-      task("brk-cut", "BRK-118", "Cut cabinet panels", "panel-saw", "plywood", 5, 2, [], "2026-10-14"),
-      task("brk-assemble", "BRK-118", "Assemble cabinet set", "assembly-bay", "plywood", 0, 2.5, ["brk-cut"], "2026-10-15"),
-      task("brk-finish", "BRK-118", "Finish cabinet set", "finish-booth", "plywood", 0, 2, ["brk-assemble"], "2026-10-16"),
-      task("mor-cut", "MOR-031", "Cut shelf blanks", "panel-saw", "plywood", 4, 1.5, [], "2026-10-14"),
-      task("mor-assemble", "MOR-031", "Build shelf units", "assembly-bay", "plywood", 0, 2, ["mor-cut"], "2026-10-16"),
-      task("mor-finish", "MOR-031", "Finish shelf units", "finish-booth", "plywood", 0, 1.5, ["mor-assemble"], "2026-10-19"),
-      task("ng-cut", "NG-007", "Cut workbench panels", "panel-saw", "plywood", 5, 2, [], "2026-10-15"),
-      task("ng-assemble", "NG-007", "Assemble workbench", "assembly-bay", "plywood", 0, 2, ["ng-cut"], "2026-10-16"),
-      task("ng-finish", "NG-007", "Finish workbench", "finish-booth", "plywood", 0, 1.5, ["ng-assemble"], "2026-10-19"),
-      task("riv-cut", "RIV-052", "Cut reception desk panels", "panel-saw", "plywood", 4, 2, [], "2026-10-15"),
-      task("riv-assemble", "RIV-052", "Assemble reception desk", "assembly-bay", "plywood", 0, 2, ["riv-cut"], "2026-10-16"),
-      task("riv-finish", "RIV-052", "Finish reception desk", "finish-booth", "plywood", 0, 1.5, ["riv-assemble"], "2026-10-19"),
-      task("lee-cut", "LEE-043", "Mill credenza parts", "cnc-router", "walnut", 34, 3, [], "2026-10-13"),
-      task("lee-assemble", "LEE-043", "Assemble credenza", "assembly-bay", "walnut", 0, 3, ["lee-cut"], "2026-10-15"),
-      task("lee-finish", "LEE-043", "Oil and finish credenza", "finish-booth", "walnut", 0, 2, ["lee-assemble"], "2026-10-16"),
-      task("das-cut", "DAS-021", "Mill side-table parts", "cnc-router", "maple", 22, 3, [], "2026-10-14"),
-      task("das-assemble", "DAS-021", "Assemble side tables", "assembly-bay", "maple", 0, 2, ["das-cut"], "2026-10-16"),
-      task("das-finish", "DAS-021", "Finish side tables", "finish-booth", "maple", 0, 2, ["das-assemble"], "2026-10-19"),
-      task("fin-cut", "FIN-009", "Machine display components", "cnc-router", "birch", 8, 3, [], "2026-10-14"),
-      task("fin-assemble", "FIN-009", "Assemble display stands", "assembly-bay", "birch", 0, 2.5, ["fin-cut"], "2026-10-16"),
-      task("fin-finish", "FIN-009", "Seal display stands", "finish-booth", "birch", 0, 2, ["fin-assemble"], "2026-10-19"),
+      task("pal-cut", "PAL-204", "Cut table panels", "panel-saw", "plywood", 4, 2, [], date("2026-10-14")),
+      task("pal-assemble", "PAL-204", "Assemble table", "assembly-bay", "plywood", 0, 2.5, ["pal-cut"], date("2026-10-15")),
+      task("pal-finish", "PAL-204", "Sand and finish", "finish-booth", "plywood", 0, 2, ["pal-assemble"], date("2026-10-16")),
+      task("brk-cut", "BRK-118", "Cut cabinet panels", "panel-saw", "plywood", 5, 2, [], date("2026-10-14")),
+      task("brk-assemble", "BRK-118", "Assemble cabinet set", "assembly-bay", "plywood", 0, 2.5, ["brk-cut"], date("2026-10-15")),
+      task("brk-finish", "BRK-118", "Finish cabinet set", "finish-booth", "plywood", 0, 2, ["brk-assemble"], date("2026-10-16")),
+      task("mor-cut", "MOR-031", "Cut shelf blanks", "panel-saw", "plywood", 4, 1.5, [], date("2026-10-14")),
+      task("mor-assemble", "MOR-031", "Build shelf units", "assembly-bay", "plywood", 0, 2, ["mor-cut"], date("2026-10-16")),
+      task("mor-finish", "MOR-031", "Finish shelf units", "finish-booth", "plywood", 0, 1.5, ["mor-assemble"], date("2026-10-19")),
+      task("ng-cut", "NG-007", "Cut workbench panels", "panel-saw", "plywood", 5, 2, [], date("2026-10-15")),
+      task("ng-assemble", "NG-007", "Assemble workbench", "assembly-bay", "plywood", 0, 2, ["ng-cut"], date("2026-10-16")),
+      task("ng-finish", "NG-007", "Finish workbench", "finish-booth", "plywood", 0, 1.5, ["ng-assemble"], date("2026-10-19")),
+      task("riv-cut", "RIV-052", "Cut reception desk panels", "panel-saw", "plywood", 4, 2, [], date("2026-10-15")),
+      task("riv-assemble", "RIV-052", "Assemble reception desk", "assembly-bay", "plywood", 0, 2, ["riv-cut"], date("2026-10-16")),
+      task("riv-finish", "RIV-052", "Finish reception desk", "finish-booth", "plywood", 0, 1.5, ["riv-assemble"], date("2026-10-19")),
+      task("lee-cut", "LEE-043", "Mill credenza parts", "cnc-router", "walnut", 34, 3, [], date("2026-10-13")),
+      task("lee-assemble", "LEE-043", "Assemble credenza", "assembly-bay", "walnut", 0, 3, ["lee-cut"], date("2026-10-15")),
+      task("lee-finish", "LEE-043", "Oil and finish credenza", "finish-booth", "walnut", 0, 2, ["lee-assemble"], date("2026-10-16")),
+      task("das-cut", "DAS-021", "Mill side-table parts", "cnc-router", "maple", 22, 3, [], date("2026-10-14")),
+      task("das-assemble", "DAS-021", "Assemble side tables", "assembly-bay", "maple", 0, 2, ["das-cut"], date("2026-10-16")),
+      task("das-finish", "DAS-021", "Finish side tables", "finish-booth", "maple", 0, 2, ["das-assemble"], date("2026-10-19")),
+      task("fin-cut", "FIN-009", "Machine display components", "cnc-router", "birch", 8, 3, [], date("2026-10-14")),
+      task("fin-assemble", "FIN-009", "Assemble display stands", "assembly-bay", "birch", 0, 2.5, ["fin-cut"], date("2026-10-16")),
+      task("fin-finish", "FIN-009", "Seal display stands", "finish-booth", "birch", 0, 2, ["fin-assemble"], date("2026-10-19")),
     ],
     plans: [],
     actionHistory: [],

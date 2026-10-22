@@ -7,7 +7,7 @@
     "dev": "export NODE_ENV=development CASCADE_AUTH_MODE=development && pnpm run build && pnpm run start",
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
-    "test": "tsx --test src/lib/cascade/domain.test.ts src/lib/cascade/security.test.ts",
+    "test": "tsx --test src/lib/cascade/domain.test.ts src/lib/cascade/security.test.ts src/lib/cascade/mcp.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

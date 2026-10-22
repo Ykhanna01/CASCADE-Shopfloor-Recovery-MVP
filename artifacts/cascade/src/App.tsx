@@ -354,15 +354,17 @@ function Home() {
   const selectedTargetOrderId = targetOrders.some((order) => order.id === targetOrderId)
     ? targetOrderId
     : targetOrders[0]?.id ?? '';
+  const headlineTargetOrder = orders.find((order) => order.id === selectedTargetOrderId);
+  const constraintTargetOrder = orders.find((order) => order.id === activePlan?.targetOrderId) ?? headlineTargetOrder;
   const localActions = alternatives.length ? alternatives : state.plans;
   return <div className="min-h-[100dvh] bg-[hsl(var(--background))] text-foreground">
     <Header health={health.data?.status} onHistory={() => setShowHistory(true)} onLogout={authSession.required ? logout : undefined} />
     <main className="mx-auto max-w-[1540px] px-4 pb-12 pt-5 sm:px-6 lg:px-8">
       <section className="mb-6 grid gap-5 border-b border-[hsl(var(--border))] pb-6 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
         <div className="max-w-3xl">
-          <div className="mb-3 flex flex-wrap items-center gap-2"><span className="eyebrow">Northstar Custom Works / Shift A</span><span className="rounded-sm bg-amber-100 px-1.5 py-0.5 font-mono text-[9px] font-medium uppercase tracking-wide text-amber-900">{state.simulationLabel || 'Simulated workshop data'}</span></div>
-          <h1 className="display text-[28px] font-semibold leading-tight sm:text-[36px]">Can Palmer ship Friday without making another customer late?</h1>
-          <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted-foreground">A two-day plywood delay is on the board. CASCADE compares real schedule options against Palmer’s hard deadline and every other customer commitment.</p>
+          <div className="mb-3 flex flex-wrap items-center gap-2"><span className="eyebrow">Northstar Custom Works / Shift A</span><span className="eyebrow">{state.scenarioName}</span><span className="rounded-sm bg-amber-100 px-1.5 py-0.5 font-mono text-[9px] font-medium uppercase tracking-wide text-amber-900">{state.simulationLabel || 'Simulated workshop data'}</span></div>
+          <h1 className="display text-[28px] font-semibold leading-tight sm:text-[36px]">{headlineTargetOrder ? `Can ${headlineTargetOrder.customer} meet the ${formatWeekday(headlineTargetOrder.dueDate)} deadline without making another customer late?` : 'Can the selected order meet its deadline without making another customer late?'}</h1>
+          <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted-foreground">{activeDisruption ? `A ${activeDisruption.delayDays}-day ${activeDisruption.materialName.toLowerCase()} delay is active in the simulation.` : 'Ready to model the default two-day cabinet-grade plywood delay.'} CASCADE compares deterministic options against the selected hard deadline and all other customer commitments.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2 lg:justify-end">
           <div className="flex min-h-10 items-center gap-2 border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-3 text-xs text-muted-foreground"><span className={`h-2 w-2 rounded-full ${health.data?.status === 'ok' || health.data?.status === 'healthy' ? 'bg-emerald-600' : 'bg-amber-500'}`} /><span>API {health.data?.status ?? 'checking'}</span></div>
@@ -431,7 +433,7 @@ function Home() {
                   </Button>
                 </div>
               </div>
-              <p className="mt-3 flex items-center gap-1.5 text-[11px] text-muted-foreground"><CircleHelp size={13} />Voice input fills the scenario. Simulation changes only fictional shop data; no supplier or customer is contacted.</p>
+              <p className="mt-3 flex items-center gap-1.5 text-[11px] text-muted-foreground"><CircleHelp size={13} />The prompt is a scenario note; the material and delay controls drive the simulation. Voice capture only fills the note. No supplier or customer is contacted.</p>
             </div>
           </section>
 
@@ -523,7 +525,7 @@ function Home() {
               <div className="grid gap-3 md:grid-cols-3">
                 {localActions.map((plan, index) => <RecoveryCard key={plan.id} plan={plan} index={index} active={activePlanId === plan.id} onSelect={() => setActivePlanId(plan.id)} />)}
               </div>
-              <p className="mt-4 border-l-2 border-[hsl(var(--accent))] bg-[hsl(var(--background))] px-3 py-2.5 text-xs leading-relaxed text-muted-foreground"><strong className="text-foreground">Constraint policy:</strong> Palmer’s Friday deadline is a hard requirement. Other customer deadlines remain visible preferences and late-order penalties; an infeasible plan never counts as a recommendation.</p>
+              <p className="mt-4 border-l-2 border-[hsl(var(--accent))] bg-[hsl(var(--background))] px-3 py-2.5 text-xs leading-relaxed text-muted-foreground"><strong className="text-foreground">Constraint policy:</strong> {constraintTargetOrder ? `${constraintTargetOrder.customer}’s ${formatWeekday(constraintTargetOrder.dueDate)} deadline` : 'The selected order’s deadline'} is a hard requirement. Other customer deadlines remain visible preferences and late-order penalties; an infeasible plan never counts as a recommendation.</p>
             </div>}
 
             {activePlan && <div className="border-t border-[hsl(var(--border))] bg-[hsl(var(--background))] p-5" data-testid={`panel-plan-detail-${activePlan.id}`}>
@@ -731,6 +733,13 @@ function formatDate(value: string) {
   if (!value) return '—';
   const date = new Date(`${value.length <= 10 ? `${value}T12:00:00` : value}`);
   return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(date);
+}
+function formatWeekday(value: string) {
+  if (!value) return 'due-date';
+  const date = new Date(`${value}T12:00:00.000Z`);
+  return Number.isNaN(date.getTime())
+    ? 'due-date'
+    : new Intl.DateTimeFormat('en-US', { weekday: 'long', timeZone: 'UTC' }).format(date);
 }
 function formatTime(value: string) {
   if (!value) return 'unknown time';

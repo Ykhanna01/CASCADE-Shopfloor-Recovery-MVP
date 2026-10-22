@@ -122,6 +122,24 @@ test("demo scenario is internally consistent and contains eight customer orders"
   assert.ok(state.tasks.every((item) => item.dependsOn.every((id) => state.tasks.some((task) => task.id === id))));
 });
 
+test("demo planning dates follow the current workweek and preserve the Friday deadline scenario", () => {
+  const scenarioNow = new Date("2026-10-22T12:00:00.000Z");
+  const state = createInitialState(scenarioNow);
+  const palletOrder = state.orders.find((order) => order.id === "PAL-204")!;
+  const plywood = state.materials.find((material) => material.id === "plywood")!;
+  const disrupted = simulateDisruption(state, "plywood", 2, scenarioNow);
+
+  assert.equal(
+    state.scenarioName,
+    "Northstar Custom Works — planning horizon from October 19, 2026",
+  );
+  assert.equal(plywood.scheduledArrival, "2026-10-21");
+  assert.equal(palletOrder.dueDate, "2026-10-23");
+  assert.equal(new Date(`${palletOrder.dueDate}T12:00:00.000Z`).getUTCDay(), 5);
+  assert.equal(disrupted.disruption?.originalArrivalDate, "2026-10-21");
+  assert.equal(disrupted.disruption?.revisedArrivalDate, palletOrder.dueDate);
+});
+
 test("tool input schemas accept a valid delay and reject invalid values", () => {
   assert.equal(
     toolInputSchemas.simulate_disruption.safeParse({
