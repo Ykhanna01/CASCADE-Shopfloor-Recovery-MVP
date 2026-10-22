@@ -7,7 +7,7 @@ import {
   LogOut, Mic, Package, Radio, RefreshCw, ShieldCheck, Siren, Truck, WandSparkles, X,
 } from 'lucide-react';
 import {
-  getGetActionHistoryQueryKey, getGetShopStateQueryKey, getHealthCheckQueryKey,
+  getActionHistory, getGetActionHistoryQueryKey, getGetShopStateQueryKey, getHealthCheckQueryKey, getShopState,
   useAnalyzeImpact, useApproveRecovery, useExecuteRecovery, useGetActionHistory,
   useGetShopState, useHealthCheck, useProposeRecovery, useSimulateDisruption,
   useVerifyRecovery,
@@ -19,7 +19,14 @@ import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import NotFound from '@/pages/not-found';
 import { Route, Switch, useLocation, Router as WouterRouter } from 'wouter';
-import { refetchAll, refreshWorkspaceState } from './workspace-refresh.mjs';
+import {
+  refetchAll,
+  refreshActionHistory,
+  refetchHistoryForWorkspace,
+  refreshWorkspaceState,
+  scenarioQueryKey,
+  scenarioRequestHeaders,
+} from './workspace-refresh.mjs';
 
 const queryClient = new QueryClient();
 const DEMO_PROMPT = 'Our plywood shipment is delayed by two days. Can we still deliver the Palmer order on Friday without making our other customers late?';
@@ -125,12 +132,17 @@ function SignInPanel({ password, error, pending, onPasswordChange, onSubmit }: {
 
 function Home() {
   const queryClient = useQueryClient();
+  const [scenarioId, setScenarioId] = useState(activeScenarioId);
+  const scenarioIdRef = useRef(scenarioId);
+  scenarioIdRef.current = scenarioId;
+  const shopQueryKey = scenarioQueryKey(getGetShopStateQueryKey(), scenarioId);
+  const historyQueryKey = scenarioQueryKey(getGetActionHistoryQueryKey(), scenarioId);
   const [authSession, setAuthSession] = useState({ checked: false, required: false, authenticated: false, csrfToken: null as string | null, unavailable: false });
   const [loginPassword, setLoginPassword] = useState('');
   const [loginPending, setLoginPending] = useState(false);
   const [loginError, setLoginError] = useState('');
-  const shop = useGetShopState();
-  const history = useGetActionHistory();
+  const shop = useGetShopState({ query: { queryKey: shopQueryKey } });
+  const history = useGetActionHistory({ query: { queryKey: historyQueryKey } });
   const health = useHealthCheck();
   const simulateMutation = useSimulateDisruption();
   const analyzeMutation = useAnalyzeImpact();
@@ -149,14 +161,22 @@ function Home() {
   const [confirmExecuteId, setConfirmExecuteId] = useState('');
   const [executionAcknowledged, setExecutionAcknowledged] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [confirmNewDemo, setConfirmNewDemo] = useState(false);
   const [notice, setNotice] = useState('');
   const [voiceListening, setVoiceListening] = useState(false);
   const [refreshPending, setRefreshPending] = useState(false);
   const [newDemoPending, setNewDemoPending] = useState(false);
   const [workspaceError, setWorkspaceError] = useState('');
+  const [historyRefreshStatus, setHistoryRefreshStatus] = useState({
+    scenarioId: null as string | null,
+    pending: false,
+    error: '',
+    message: '',
+  });
   const refreshInFlight = useRef(false);
   const newDemoInFlight = useRef(false);
   const newDemoRequestId = useRef('');
+  const historyRefreshInFlight = useRef(new Set<string | null>());
   const analyzedDisruptionId = useRef('');
   const restoredVerificationPlanId = useRef('');
 
@@ -186,6 +206,9 @@ function Home() {
   const tasks = state?.tasks ?? [];
   const machines = state?.machines ?? [];
   const events = (history.data ?? []) as ActionEvent[];
+  const visibleHistoryRefreshStatus = historyRefreshStatus.scenarioId === scenarioId
+    ? historyRefreshStatus
+    : null;
   const selectedMaterialId = materialId || materials.find((material) => material.name.toLowerCase().includes('plywood'))?.id || materials[0]?.id || '';
   const activeDisruption = impact?.disruption ?? state?.disruption ?? null;
   const activePlan = alternatives.find((plan) => plan.id === activePlanId) ?? state?.plans.find((plan) => plan.id === activePlanId) ?? null;
@@ -195,7 +218,7 @@ function Home() {
   const anyPending = simulateMutation.isPending || analyzeMutation.isPending || proposeMutation.isPending ||
     approveMutation.isPending || executeMutation.isPending || verifyMutation.isPending ||
     refreshPending || newDemoPending;
-  const firstError = shop.error || history.error || simulateMutation.error || analyzeMutation.error ||
+  const firstError = shop.error || simulateMutation.error || analyzeMutation.error ||
     proposeMutation.error || approveMutation.error || executeMutation.error || verifyMutation.error;
 
   const refreshWorkspace = () => refreshWorkspaceState({
@@ -205,7 +228,12 @@ function Home() {
     refetch: async () => {
       const results = await refetchAll([
         () => shop.refetch({ throwOnError: true }),
-        () => history.refetch({ throwOnError: true }),
+        () => refetchHistoryForWorkspace({
+          scenarioId,
+          isCurrentScenario: () => scenarioIdRef.current === scenarioId,
+          setStatus: setHistoryRefreshStatus,
+          refetch: () => history.refetch({ throwOnError: true }),
+        }),
         () => health.refetch({ throwOnError: true }),
       ] as const);
       const failedResult = results.find((result) => result.isError);
@@ -228,9 +256,33 @@ function Home() {
     },
   });
 
+  const refreshCurrentDemo = async () => {
+    setNotice('');
+    const refreshed = await refreshWorkspace();
+    if (refreshed) {
+      setNotice('Current demo reloaded from saved state. No scenario was created or reset.');
+    }
+  };
+
+  const refreshCurrentHistory = () => refreshActionHistory({
+    scenarioId,
+    inFlight: historyRefreshInFlight,
+    isCurrentScenario: () => scenarioIdRef.current === scenarioId,
+    setStatus: setHistoryRefreshStatus,
+    refetch: (requestedScenarioId) => queryClient.fetchQuery({
+      queryKey: scenarioQueryKey(getGetActionHistoryQueryKey(), requestedScenarioId),
+      queryFn: ({ signal }) => getActionHistory({
+        signal,
+        headers: scenarioRequestHeaders(requestedScenarioId),
+      }),
+      staleTime: 0,
+    }),
+  });
+
   const startNewDemo = async () => {
     if (newDemoInFlight.current) return;
     newDemoInFlight.current = true;
+    let createdScenarioId: string | null = null;
     setNewDemoPending(true);
     setWorkspaceError('');
     setNotice('');
@@ -243,9 +295,24 @@ function Home() {
           body: JSON.stringify({ requestId: newDemoRequestId.current }),
         },
       );
+      createdScenarioId = created.scenarioId;
       const scenarioStored = saveActiveScenarioId(created.scenarioId);
-      queryClient.setQueryData(getGetShopStateQueryKey(), created.state);
-      queryClient.setQueryData(getGetActionHistoryQueryKey(), []);
+      scenarioIdRef.current = created.scenarioId;
+      setScenarioId(created.scenarioId);
+      queryClient.setQueryData(
+        scenarioQueryKey(getGetShopStateQueryKey(), created.scenarioId),
+        created.state,
+      );
+      queryClient.setQueryData(
+        scenarioQueryKey(getGetActionHistoryQueryKey(), created.scenarioId),
+        [],
+      );
+      setHistoryRefreshStatus({
+        scenarioId: created.scenarioId,
+        pending: false,
+        error: '',
+        message: '',
+      });
       simulateMutation.reset();
       analyzeMutation.reset();
       proposeMutation.reset();
@@ -265,17 +332,35 @@ function Home() {
       analyzedDisruptionId.current = '';
       restoredVerificationPlanId.current = '';
       const refreshed = await refetchAll([
-        () => shop.refetch({ throwOnError: true }),
-        () => history.refetch({ throwOnError: true }),
+        () => queryClient.fetchQuery({
+          queryKey: scenarioQueryKey(getGetShopStateQueryKey(), created.scenarioId),
+          queryFn: ({ signal }) => getShopState({
+            signal,
+            headers: scenarioRequestHeaders(created.scenarioId),
+          }),
+          staleTime: 0,
+        }),
+        () => queryClient.fetchQuery({
+          queryKey: scenarioQueryKey(getGetActionHistoryQueryKey(), created.scenarioId),
+          queryFn: ({ signal }) => getActionHistory({
+            signal,
+            headers: scenarioRequestHeaders(created.scenarioId),
+          }),
+          staleTime: 0,
+        }),
+        () => health.refetch({ throwOnError: true }),
       ] as const);
-      const failedResult = refreshed.find((result) => result.isError);
-      if (failedResult?.isError) throw failedResult.error;
+      if (refreshed[2].isError) throw refreshed[2].error;
+      if (!refreshed[0]) throw new Error('The API returned no workshop state for the new demo.');
       newDemoRequestId.current = '';
       setNotice(scenarioStored
         ? 'A fresh simulated demo started. The previous run and its audit history were preserved.'
         : 'A fresh simulated demo is active for this tab only because browser storage and URL persistence were unavailable.');
     } catch (error) {
-      setWorkspaceError(error instanceof Error ? error.message : 'Unable to start a new demo.');
+      const message = error instanceof Error ? error.message : 'Unable to start a new demo.';
+      setWorkspaceError(createdScenarioId
+        ? `The new demo was created and selected, but not every section could be refreshed. ${message}`
+        : message);
     } finally {
       newDemoInFlight.current = false;
       setNewDemoPending(false);
@@ -487,14 +572,30 @@ function Home() {
     <main className="mx-auto max-w-[1540px] px-4 pb-12 pt-5 sm:px-6 lg:px-8">
       <section className="mb-6 grid gap-5 border-b border-[hsl(var(--border))] pb-6 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
         <div className="max-w-3xl">
-          <div className="mb-3 flex flex-wrap items-center gap-2"><span className="eyebrow">Northstar Custom Works / Shift A</span><span className="eyebrow">{state.scenarioName}</span><span className="rounded-sm bg-amber-100 px-1.5 py-0.5 font-mono text-[9px] font-medium uppercase tracking-wide text-amber-900">{state.simulationLabel || 'Simulated workshop data'}</span></div>
+          <div className="mb-3 flex flex-wrap items-center gap-2"><span className="eyebrow">Northstar Custom Works / Shift A</span><span className="inline-flex items-center gap-1.5 rounded border border-[hsl(var(--border))] px-2 py-1 text-[10px]" data-testid="current-demo-indicator"><span className="eyebrow">Current demo</span><span className="mono">{scenarioId ?? 'northstar-demo'}</span></span><span className="eyebrow">{state.scenarioName}</span><span className="rounded-sm bg-amber-100 px-1.5 py-0.5 font-mono text-[9px] font-medium uppercase tracking-wide text-amber-900">{state.simulationLabel || 'Simulated workshop data'}</span></div>
           <h1 className="display text-[28px] font-semibold leading-tight sm:text-[36px]">{headlineTargetOrder ? `Can ${headlineTargetOrder.customer} meet the ${formatWeekday(headlineTargetOrder.dueDate)} deadline without making another customer late?` : 'Can the selected order meet its deadline without making another customer late?'}</h1>
           <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted-foreground">{activeDisruption ? `A ${activeDisruption.delayDays}-day ${activeDisruption.materialName.toLowerCase()} delay is active in the simulation.` : 'Ready to model the default two-day cabinet-grade plywood delay.'} CASCADE compares deterministic options against the selected hard deadline and all other customer commitments.</p>
         </div>
-        <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+        <div className="grid gap-3 lg:justify-items-end">
           <div className="flex min-h-10 items-center gap-2 border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-3 text-xs text-muted-foreground"><span className={`h-2 w-2 rounded-full ${health.data?.status === 'ok' || health.data?.status === 'healthy' ? 'bg-emerald-600' : 'bg-amber-500'}`} /><span>API {health.data?.status ?? 'checking'}</span></div>
-          <Button kind="secondary" testId="button-refresh-workspace" disabled={anyPending} onClick={() => { void refreshWorkspace(); }}><RefreshCw size={14} className={refreshPending ? 'animate-spin' : ''} /> {refreshPending ? 'Refreshing' : 'Refresh data'}</Button>
-          <Button kind="primary" testId="button-new-demo" disabled={anyPending} onClick={() => { void startNewDemo(); }}><RefreshCw size={14} className={newDemoPending ? 'animate-spin' : ''} /> {newDemoPending ? 'Starting demo' : 'New demo'}</Button>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <Button kind="primary" testId="button-refresh-workspace" disabled={anyPending} onClick={() => { void refreshCurrentDemo(); }}><RefreshCw size={14} className={refreshPending ? 'animate-spin' : ''} /> {refreshPending ? 'Refreshing current demo' : 'Refresh current demo'}</Button>
+              <p className="mt-1 max-w-56 text-[10px] leading-relaxed text-muted-foreground">Reload this demo’s saved state, recovery plans, verification, and action history. Does not create or reset a scenario.</p>
+            </div>
+            <div>
+              <Button kind="secondary" testId="button-new-demo" disabled={anyPending} onClick={() => setConfirmNewDemo(true)}><RefreshCw size={14} className={newDemoPending ? 'animate-spin' : ''} /> {newDemoPending ? 'Starting new demo' : 'Start new demo'}</Button>
+              <p className="mt-1 max-w-56 text-[10px] leading-relaxed text-muted-foreground">Create a separate fresh scenario. Your current demo and its audit history remain available.</p>
+            </div>
+          </div>
+          {confirmNewDemo && <div role="alertdialog" aria-labelledby="confirm-new-demo-title" aria-describedby="confirm-new-demo-description" className="max-w-md rounded-md border border-amber-300 bg-amber-50 p-3 text-left">
+            <h2 id="confirm-new-demo-title" className="text-xs font-semibold text-amber-950">Start a separate fresh demo?</h2>
+            <p id="confirm-new-demo-description" className="mt-1 text-[11px] leading-relaxed text-amber-900">Your current demo and its action history will be preserved. CASCADE will switch to the new scenario only after it is created.</p>
+            <div className="mt-3 flex justify-end gap-2">
+              <Button kind="quiet" testId="button-cancel-new-demo" onClick={() => setConfirmNewDemo(false)}>Cancel</Button>
+              <Button kind="secondary" testId="button-confirm-new-demo" disabled={anyPending} onClick={() => { setConfirmNewDemo(false); void startNewDemo(); }}>Create new demo</Button>
+            </div>
+          </div>}
         </div>
       </section>
 
@@ -723,7 +824,14 @@ function Home() {
         <button data-testid="button-open-history-footer" className="inline-flex items-center gap-1.5 text-primary hover:underline" onClick={() => setShowHistory(true)}><FileClock size={13} /> Auditable action history <ChevronRight size={13} /></button>
       </footer>
     </main>
-    {showHistory && <HistoryDrawer events={events} loading={history.isLoading} error={history.error} onClose={() => setShowHistory(false)} onRefresh={() => void history.refetch()} />}
+    {showHistory && <HistoryDrawer
+      events={events}
+      loading={history.isLoading || history.isFetching || Boolean(visibleHistoryRefreshStatus?.pending)}
+      error={visibleHistoryRefreshStatus?.error || (history.isError ? 'Could not load action history. Check the connection and try again.' : '')}
+      successMessage={visibleHistoryRefreshStatus?.message ?? ''}
+      onClose={() => setShowHistory(false)}
+      onRefresh={() => { void refreshCurrentHistory(); }}
+    />}
     {anyPending && <div className="pointer-events-none fixed bottom-4 right-4 z-30 hidden rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-3 py-2 text-xs shadow-md sm:flex sm:items-center sm:gap-2"><RefreshCw size={13} className="animate-spin text-primary" />Updating simulated shift…</div>}
   </div>;
 }
@@ -830,17 +938,18 @@ function VerificationPanel({ result }: { result: VerificationResult }) {
   </div>;
 }
 
-function HistoryDrawer({ events, loading, error, onClose, onRefresh }: {
-  events: ActionEvent[]; loading: boolean; error: unknown; onClose: () => void; onRefresh: () => void;
+function HistoryDrawer({ events, loading, error, successMessage, onClose, onRefresh }: {
+  events: ActionEvent[]; loading: boolean; error: string; successMessage: string; onClose: () => void; onRefresh: () => void;
 }) {
-  const errorMessage = error instanceof Error ? error.message : 'Action history could not be loaded.';
   return <div className="fixed inset-0 z-50 flex justify-end bg-slate-950/30" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <aside role="dialog" aria-modal="true" aria-labelledby="history-title" className="flex h-full w-full max-w-[480px] flex-col border-l border-[hsl(var(--border))] bg-[hsl(var(--card))] shadow-2xl">
       <div className="flex items-start justify-between border-b border-[hsl(var(--border))] px-5 py-4"><div><div className="eyebrow">Audit record · simulated</div><h2 id="history-title" className="display mt-1 text-xl font-semibold">Action history</h2><p className="mt-1 text-xs text-muted-foreground">Every simulator action, approval, and outcome in sequence.</p></div><button data-testid="button-close-history" aria-label="Close history" onClick={onClose} className="rounded p-2 hover:bg-[hsl(var(--muted))]"><X size={18} /></button></div>
-      <div className="flex items-center justify-between border-b border-[hsl(var(--border))] px-5 py-3"><span className="mono text-[10px] text-muted-foreground">{events.length} events</span><button data-testid="button-refresh-history" onClick={onRefresh} className="inline-flex items-center gap-1.5 text-xs font-semibold text-primary"><RefreshCw size={13} /> Refresh</button></div>
+      <div className="flex items-center justify-between border-b border-[hsl(var(--border))] px-5 py-3"><span className="mono text-[10px] text-muted-foreground">{events.length} events</span><button type="button" data-testid="button-refresh-history" aria-busy={loading} disabled={loading} onClick={onRefresh} className="inline-flex min-h-8 items-center gap-1.5 text-xs font-semibold text-primary disabled:cursor-not-allowed disabled:opacity-50">{loading ? <><RefreshCw size={13} className="animate-spin" /> Refreshing…</> : <><RefreshCw size={13} /> Refresh history</>}</button></div>
       <div className="scrollbar-thin flex-1 overflow-y-auto px-5 py-4">
+        {loading && <p role="status" aria-live="polite" className="mb-3 flex items-center gap-2 text-xs text-muted-foreground"><RefreshCw size={13} className="animate-spin text-primary" />Refreshing this demo’s saved action history…</p>}
+        {!loading && successMessage && <p role="status" aria-live="polite" className="mb-3 rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">{successMessage}</p>}
+        {error && <div role="alert" className="mb-3 rounded border border-rose-200 bg-rose-50 p-3 text-xs text-rose-900"><p>{error}</p><Button kind="secondary" testId="button-retry-history" className="mt-3" disabled={loading} onClick={onRefresh}><RefreshCw size={13} /> Try again</Button></div>}
         {loading ? <div className="space-y-3"><div className="skeleton h-16" /><div className="skeleton h-16" /><div className="skeleton h-16" /></div> :
-          error ? <div role="alert" className="rounded border border-rose-200 bg-rose-50 p-3 text-xs text-rose-900"><p>{errorMessage}</p><Button kind="secondary" testId="button-retry-history" className="mt-3" onClick={onRefresh}><RefreshCw size={13} /> Try again</Button></div> :
           events.length ? <ol className="relative ml-2 border-l border-[hsl(var(--border))] pl-5">{events.map((event) => <li key={event.id} data-testid={`event-history-${event.id}`} className="relative pb-5 last:pb-0"><span className="absolute -left-[25px] top-1 flex h-3 w-3 items-center justify-center rounded-full border-2 border-[hsl(var(--card))] bg-primary" />
             <div className="flex items-start justify-between gap-2"><div><div className="text-xs font-semibold">{event.action}</div><p className="mt-1 text-xs leading-relaxed text-muted-foreground">{event.description}</p></div><Status tone={event.status.toLowerCase().includes('success') || event.status.toLowerCase().includes('complete') ? 'good' : event.status.toLowerCase().includes('fail') ? 'bad' : 'neutral'}>{event.status}</Status></div>
             <div className="mt-2 flex items-center gap-2 font-mono text-[9px] text-muted-foreground"><Clock3 size={11} />{formatTime(event.timestamp)}{event.planId && <><span>·</span><span>Plan {event.planId}</span></>}</div>

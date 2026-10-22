@@ -380,3 +380,41 @@ test("requests without a scenario header keep using the legacy default scenario"
     assert.equal(store.states.size, 1);
   });
 });
+
+test("action history reads the selected scenario without mutating either scenario", async () => {
+  const store = inMemoryStore();
+  const selectedScenarioId = "demo-f101b516-9117-4f1c-a81a-000000000005";
+  const defaultState = store.states.get("northstar-demo")!;
+  const selectedState = createInitialState(new Date("2026-10-22T12:00:00.000Z"));
+  const event = {
+    id: "action-selected",
+    action: "recovery_verified",
+    description: "Selected demo history",
+    timestamp: "2026-10-22T12:00:00.000Z",
+    planId: "plan-selected",
+    status: "verified",
+  };
+  store.states.set("northstar-demo", {
+    ...defaultState,
+    actionHistory: [{ ...event, id: "action-default", description: "Default history" }],
+  });
+  store.states.set(selectedScenarioId, {
+    ...selectedState,
+    actionHistory: [event],
+  });
+  const stateBefore = new Map(
+    [...store.states].map(([id, state]) => [id, JSON.stringify(state)]),
+  );
+
+  await withServer(createApp(store), async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/cascade/actions`, {
+      headers: { "x-cascade-scenario-id": selectedScenarioId },
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), [event]);
+    assert.deepEqual(
+      [...store.states].map(([id, state]) => [id, JSON.stringify(state)]),
+      [...stateBefore],
+    );
+  });
+});

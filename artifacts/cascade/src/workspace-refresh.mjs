@@ -29,3 +29,65 @@ export async function refetchAll(refetches) {
     return result.value;
   });
 }
+
+export function scenarioQueryKey(queryKey, scenarioId) {
+  return [...queryKey, scenarioId ?? "northstar-demo"];
+}
+
+export function scenarioRequestHeaders(scenarioId) {
+  return scenarioId ? { "x-cascade-scenario-id": scenarioId } : {};
+}
+
+export async function refetchHistoryForWorkspace({
+  scenarioId,
+  isCurrentScenario,
+  setStatus,
+  refetch,
+}) {
+  const result = await refetch();
+  if (isCurrentScenario()) {
+    setStatus((current) => current.scenarioId === scenarioId
+      ? { ...current, error: "", message: "Action history refreshed." }
+      : current);
+  }
+  return result;
+}
+
+export async function refreshActionHistory({
+  scenarioId,
+  inFlight,
+  isCurrentScenario,
+  setStatus,
+  refetch,
+}) {
+  if (inFlight.current.has(scenarioId)) return false;
+
+  inFlight.current.add(scenarioId);
+  if (isCurrentScenario()) {
+    setStatus({ scenarioId, pending: true, error: "", message: "" });
+  }
+  try {
+    await refetch(scenarioId);
+    if (isCurrentScenario()) {
+      setStatus({
+        scenarioId,
+        pending: false,
+        error: "",
+        message: "Action history refreshed.",
+      });
+    }
+    return true;
+  } catch {
+    if (isCurrentScenario()) {
+      setStatus({
+        scenarioId,
+        pending: false,
+        error: "Could not reload action history. Check the connection and try again.",
+        message: "",
+      });
+    }
+    return false;
+  } finally {
+    inFlight.current.delete(scenarioId);
+  }
+}
