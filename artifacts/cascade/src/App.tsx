@@ -23,11 +23,13 @@ import {
   refetchAll,
   formatActionTimestamp,
   clearPendingScenario,
+  isPendingScenario,
   requestWithTimeout,
   refreshActionHistory,
   refetchHistoryForWorkspace,
   refreshWorkspaceState,
   withPendingState,
+  withScenarioPending,
   scenarioQueryKey,
   scenarioRequestHeaders,
 } from './workspace-refresh.mjs';
@@ -157,7 +159,7 @@ function Home() {
   const [materialId, setMaterialId] = useState('');
   const [delayDays, setDelayDays] = useState('2');
   const [impact, setImpact] = useState<ImpactAnalysis | null>(null);
-  const [impactPendingScenario, setImpactPendingScenario] = useState<string | null>(null);
+  const [impactPendingScenario, setImpactPendingScenario] = useState<string | null | undefined>(undefined);
   const [alternatives, setAlternatives] = useState<RecoveryPlan[]>([]);
   const [activePlanId, setActivePlanId] = useState('');
   const [targetOrderId, setTargetOrderId] = useState('PAL-204');
@@ -220,7 +222,7 @@ function Home() {
   const selectedPlanChanges = activePlan ? tasks.filter((task) => activePlan.affectedOrders.includes(task.orderId)) : [];
   const recoveredMaterial = materials.find((material) => material.id === activeDisruption?.materialId);
   const selectedMaterial = materials.find((material) => material.id === selectedMaterialId);
-  const impactPending = impactPendingScenario === scenarioId;
+  const impactPending = isPendingScenario(impactPendingScenario, scenarioId);
   const anyPending = simulateMutation.isPending || impactPending || proposeMutation.isPending ||
     approveMutation.isPending || executeMutation.isPending || verifyMutation.isPending ||
     refreshPending || newDemoPending;
@@ -288,13 +290,15 @@ function Home() {
           setImpact(null);
           setImpactPendingScenario(scenarioId);
           try {
-            const refreshedImpact = await requestImpact(scenarioId);
+            const refreshedImpact = await withScenarioPending(
+              setImpactPendingScenario,
+              scenarioId,
+              () => requestImpact(scenarioId),
+            );
             if (scenarioIdRef.current === scenarioId) setImpact(refreshedImpact);
           } catch (error) {
             if (scenarioIdRef.current === scenarioId) setImpact(null);
             throw error;
-          } finally {
-            setImpactPendingScenario((pendingScenarioId) => clearPendingScenario(pendingScenarioId, scenarioId));
           }
         } else {
           setImpact(null);
@@ -432,15 +436,16 @@ function Home() {
     if (analyzedDisruptionId.current === disruptionKey) return;
     analyzedDisruptionId.current = disruptionKey;
     setImpact(null);
-    setImpactPendingScenario(scenarioId);
-    void requestImpact(scenarioId).then((result) => {
+    void withScenarioPending(
+      setImpactPendingScenario,
+      scenarioId,
+      () => requestImpact(scenarioId),
+    ).then((result) => {
       if (scenarioIdRef.current === scenarioId) setImpact(result);
     }).catch((error: unknown) => {
       if (scenarioIdRef.current === scenarioId) {
         setWorkspaceError(error instanceof Error ? error.message : 'Impact analysis could not be completed.');
       }
-    }).finally(() => {
-      setImpactPendingScenario((pendingScenarioId) => clearPendingScenario(pendingScenarioId, scenarioId));
     });
   }, [authSession.checked, authSession.required, authSession.authenticated, scenarioId, state?.disruption?.id]);
 
@@ -519,9 +524,12 @@ function Home() {
   const recalculateImpact = async () => {
     setWorkspaceError('');
     setNotice('');
-    setImpactPendingScenario(scenarioId);
     try {
-      const result = await requestImpact(scenarioId);
+      const result = await withScenarioPending(
+        setImpactPendingScenario,
+        scenarioId,
+        () => requestImpact(scenarioId),
+      );
       if (scenarioIdRef.current === scenarioId) {
         setImpact(result);
         setNotice('Impact recalculated from the current simulated shop state.');
@@ -531,8 +539,6 @@ function Home() {
         setImpact(null);
         setWorkspaceError(error instanceof Error ? error.message : 'Impact analysis could not be completed.');
       }
-    } finally {
-      setImpactPendingScenario((pendingScenarioId) => clearPendingScenario(pendingScenarioId, scenarioId));
     }
   };
 

@@ -10,7 +10,9 @@ import {
   scenarioRequestHeaders,
   formatActionTimestamp,
   clearPendingScenario,
+  isPendingScenario,
   withPendingState,
+  withScenarioPending,
 } from "./workspace-refresh.mjs";
 
 test("new demo loading clears when request ID generation throws synchronously", async () => {
@@ -27,10 +29,77 @@ test("new demo loading clears when request ID generation throws synchronously", 
   assert.deepEqual(loading, [true, false]);
 });
 
-test("impact cleanup clears a completed inactive scenario without clearing another pending scenario", () => {
-  assert.equal(clearPendingScenario("demo-old", "demo-old"), null);
+test("default scenario is not pending until its impact request starts", () => {
+  assert.equal(isPendingScenario(undefined, null), false);
+  assert.equal(isPendingScenario(null, null), true);
+  assert.equal(clearPendingScenario(null, null), undefined);
+  assert.equal(isPendingScenario(clearPendingScenario(null, null), null), false);
+});
+
+test("impact cleanup clears completed scenarios without clearing another pending scenario", () => {
+  assert.equal(clearPendingScenario("demo-old", "demo-old"), undefined);
   assert.equal(clearPendingScenario("demo-current", "demo-old"), "demo-current");
   assert.equal(clearPendingScenario(null, "demo-old"), null);
+  assert.equal(isPendingScenario("demo-current", "demo-old"), false);
+  assert.equal(isPendingScenario("demo-current", "demo-current"), true);
+});
+
+test("default scenario pending state clears after impact success and failure", async () => {
+  let pendingScenario;
+  const setPendingScenario = (update) => {
+    pendingScenario = typeof update === "function" ? update(pendingScenario) : update;
+  };
+
+  const result = await withScenarioPending(setPendingScenario, null, async () => "impact");
+  assert.equal(result, "impact");
+  assert.equal(pendingScenario, undefined);
+  assert.equal(isPendingScenario(pendingScenario, null), false);
+
+  await assert.rejects(
+    withScenarioPending(setPendingScenario, null, async () => {
+      throw new Error("impact failed");
+    }),
+    /impact failed/,
+  );
+  assert.equal(pendingScenario, undefined);
+  assert.equal(isPendingScenario(pendingScenario, null), false);
+
+  await assert.rejects(
+    withScenarioPending(
+      setPendingScenario,
+      null,
+      () => requestWithTimeout(() => new Promise(() => {}), 5),
+    ),
+    /Request timed out/,
+  );
+  assert.equal(pendingScenario, undefined);
+  assert.equal(isPendingScenario(pendingScenario, null), false);
+});
+
+test("completion for a previous scenario preserves the currently pending scenario", async () => {
+  let pendingScenario;
+  const setPendingScenario = (update) => {
+    pendingScenario = typeof update === "function" ? update(pendingScenario) : update;
+  };
+  let finishPrevious;
+  let finishCurrent;
+  const previous = withScenarioPending(
+    setPendingScenario,
+    "demo-previous",
+    () => new Promise((resolve) => { finishPrevious = resolve; }),
+  );
+  const current = withScenarioPending(
+    setPendingScenario,
+    "demo-current",
+    () => new Promise((resolve) => { finishCurrent = resolve; }),
+  );
+
+  finishPrevious("previous");
+  assert.equal(await previous, "previous");
+  assert.equal(pendingScenario, "demo-current");
+  finishCurrent("current");
+  assert.equal(await current, "current");
+  assert.equal(pendingScenario, undefined);
 });
 
 test("workspace refresh waits for all refetched sections before clearing loading", async () => {

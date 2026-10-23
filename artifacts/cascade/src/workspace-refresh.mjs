@@ -29,8 +29,21 @@ export async function withPendingState(setPending, operation) {
   }
 }
 
+export function isPendingScenario(pendingScenarioId, scenarioId) {
+  return pendingScenarioId !== undefined && pendingScenarioId === scenarioId;
+}
+
 export function clearPendingScenario(pendingScenarioId, completedScenarioId) {
-  return pendingScenarioId === completedScenarioId ? null : pendingScenarioId;
+  return pendingScenarioId === completedScenarioId ? undefined : pendingScenarioId;
+}
+
+export async function withScenarioPending(setPendingScenario, scenarioId, operation) {
+  setPendingScenario(scenarioId);
+  try {
+    return await operation();
+  } finally {
+    setPendingScenario((pendingScenarioId) => clearPendingScenario(pendingScenarioId, scenarioId));
+  }
 }
 
 export async function refetchAll(refetches) {

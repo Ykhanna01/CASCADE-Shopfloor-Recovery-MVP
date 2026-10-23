@@ -11,9 +11,22 @@ export function withPendingState<T>(
 ): Promise<T>;
 
 export function clearPendingScenario(
-  pendingScenarioId: string | null,
+  pendingScenarioId: string | null | undefined,
   completedScenarioId: string | null,
-): string | null;
+): string | null | undefined;
+
+export function isPendingScenario(
+  pendingScenarioId: string | null | undefined,
+  scenarioId: string | null,
+): boolean;
+
+export function withScenarioPending<T>(
+  setPendingScenario: (
+    update: (pendingScenarioId: string | null | undefined) => string | null | undefined,
+  ) => void,
+  scenarioId: string | null,
+  operation: () => T | Promise<T>,
+): Promise<T>;
 
 export function refetchAll<
   T extends readonly (() => Promise<unknown>)[],
