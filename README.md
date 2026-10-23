@@ -22,6 +22,8 @@ Use Node `24.21.0` and pnpm `12.3.4`. Install dependencies from the repository r
 pnpm install --frozen-lockfile
 ```
 
+For the recommended production topology, production environment-variable names, and deployment preflight, see [DEPLOYMENT.md](./DEPLOYMENT.md).
+
 The API needs `DATABASE_URL`. For local work, use a dedicated, disposable PostgreSQL database; never point schema setup at production. Schema push changes its target database and should only be run for a fresh isolated local/staging database:
 
 ```sh
