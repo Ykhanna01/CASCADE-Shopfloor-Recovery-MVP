@@ -46,7 +46,7 @@ Refresh data re-fetches the currently selected server state, action history, and
 
 An existing deployment may still open the legacy `northstar-demo` row with stale dates until an authorized user explicitly starts a New demo. That action adds a fresh row; it does not repair or erase old state.
 
-The scenario API and stateless MCP endpoint accept `X-Cascade-Scenario-ID` to scope reads and workflow mutations to a demo row. Missing headers continue to use `northstar-demo` for backward compatibility. Browser state-changing calls, including New demo creation, retain the production signed-session and CSRF checks; MCP mutations retain bearer-token authorization. The browser password gate can be temporarily disabled for public demos with `DEMO_AUTH_ENABLED=false`; session/CSRF checks and MCP bearer-token authorization remain active. See [DEPLOYMENT.md](./DEPLOYMENT.md#temporary-public-demo-access) for the reversible Render procedure.
+The scenario API and stateless MCP endpoint accept `X-Cascade-Scenario-ID` to scope reads and workflow mutations to a demo row. Missing headers continue to use `northstar-demo` for backward compatibility. Browser state-changing calls, including New demo creation, retain the production session and CSRF checks; MCP mutations retain bearer-token authorization.
 
 ## MCP endpoint
 
