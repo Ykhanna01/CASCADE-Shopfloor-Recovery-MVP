@@ -62,6 +62,13 @@ The tests cover the fixed scenario, valid and invalid inputs, dependency impact,
 
 The sample workshop has eight fictional customer orders, four materials, four machines, and a Monday–Friday schedule for the week of October 12, 2026. The built-in demonstration delays cabinet-grade plywood by two days and asks whether the Palmer order can still ship Friday without making another customer late.
 
+## Reviewer Demo Access
+
+**Live demo:** https://cascade-shopfloor-recovery-mvp.onrender.com
+
+**Demo password:** 3ccaf3a17663b1e8202311aa62e57b8d
+
+The application uses simulated manufacturing data. No real suppliers or factory systems are contacted.
 ## License
 
 MIT. See [`LICENSE`](LICENSE).
