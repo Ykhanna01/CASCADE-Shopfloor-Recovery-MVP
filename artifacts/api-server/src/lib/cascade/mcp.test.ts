@@ -19,6 +19,7 @@ import type { CascadeStateStore } from "./store";
 const bearerToken = "mcp-integration-test-token";
 const testConfig: SecurityConfig = {
   mode: "production",
+  demoAuthEnabled: true,
   mcpBearerToken: bearerToken,
   allowedOrigins: new Set(),
   trustProxyHops: 0,

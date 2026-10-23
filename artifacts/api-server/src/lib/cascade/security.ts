@@ -5,6 +5,7 @@ export type AuthMode = "development" | "test" | "production";
 
 export interface SecurityConfig {
   mode: AuthMode;
+  demoAuthEnabled: boolean;
   webPassword?: string;
   sessionSecret?: string;
   mcpBearerToken?: string;
@@ -15,6 +16,7 @@ export interface SecurityConfig {
 interface BrowserSession {
   csrfToken: string;
   expiresAt: number;
+  demoAuthBypassed?: boolean;
 }
 
 const SESSION_COOKIE = "cascade_session";
@@ -116,6 +118,7 @@ export function loadSecurityConfig(env: NodeJS.ProcessEnv = process.env): Securi
 
   return {
     mode,
+    demoAuthEnabled: env.DEMO_AUTH_ENABLED !== "false",
     webPassword,
     sessionSecret,
     mcpBearerToken,
@@ -171,7 +174,9 @@ function readBrowserSession(request: Request, config: SecurityConfig): BrowserSe
       typeof session.csrfToken !== "string" ||
       session.csrfToken.length < 32 ||
       typeof session.expiresAt !== "number" ||
-      session.expiresAt <= Date.now()
+      session.expiresAt <= Date.now() ||
+      (session.demoAuthBypassed !== undefined && typeof session.demoAuthBypassed !== "boolean") ||
+      (config.demoAuthEnabled && session.demoAuthBypassed === true)
     ) return undefined;
     return session;
   } catch {
@@ -179,11 +184,16 @@ function readBrowserSession(request: Request, config: SecurityConfig): BrowserSe
   }
 }
 
-function createSessionToken(config: SecurityConfig, now = Date.now()): { token: string; session: BrowserSession } {
+function createSessionToken(
+  config: SecurityConfig,
+  now = Date.now(),
+  demoAuthBypassed = false,
+): { token: string; session: BrowserSession } {
   if (!config.sessionSecret) throw new Error("Browser session signing is not configured.");
   const session = {
     csrfToken: randomBytes(32).toString("base64url"),
     expiresAt: now + SESSION_TTL_SECONDS * 1000,
+    ...(demoAuthBypassed ? { demoAuthBypassed: true } : {}),
   };
   const payload = Buffer.from(JSON.stringify(session)).toString("base64url");
   return { token: `${payload}.${signSession(payload, config.sessionSecret)}`, session };
@@ -219,9 +229,14 @@ export function createAuthRouter(
       response.json({ authRequired: false, authenticated: true, csrfToken: null });
       return;
     }
-    const session = readBrowserSession(request, config);
+    let session = readBrowserSession(request, config);
+    if (!config.demoAuthEnabled && !session) {
+      const created = createSessionToken(config, now(), true);
+      setSessionCookie(response, created.token, true);
+      session = created.session;
+    }
     response.json(session
-      ? { authRequired: true, authenticated: true, csrfToken: session.csrfToken }
+      ? { authRequired: config.demoAuthEnabled, authenticated: true, csrfToken: session.csrfToken }
       : { authRequired: true, authenticated: false, csrfToken: null });
   });
 

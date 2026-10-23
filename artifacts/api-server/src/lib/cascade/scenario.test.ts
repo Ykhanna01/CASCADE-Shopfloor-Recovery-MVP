@@ -20,6 +20,7 @@ import type { CascadeStateStore } from "./store";
 const origin = "https://demo.example";
 const config: SecurityConfig = {
   mode: "production",
+  demoAuthEnabled: true,
   webPassword: "scenario-test-web-password",
   sessionSecret: "scenario-test-session-secret-longer-than-32-bytes",
   mcpBearerToken: "scenario-test-mcp-token",

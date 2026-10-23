@@ -28,6 +28,7 @@ import {
 const origin = "https://demo.example";
 const testConfig: SecurityConfig = {
   mode: "production",
+  demoAuthEnabled: true,
   webPassword: "test-only-web-password",
   sessionSecret: "test-only-session-secret-with-at-least-32-bytes",
   mcpBearerToken: "test-only-mcp-bearer-credential",
@@ -50,13 +51,18 @@ async function withServer<T>(app: Express, action: (baseUrl: string) => Promise<
   }
 }
 
-function securityTestApp(options: { limiter?: FixedWindowRateLimiter; mutationLimit?: boolean } = {}): Express {
+function securityTestApp(options: {
+  config?: SecurityConfig;
+  limiter?: FixedWindowRateLimiter;
+  mutationLimit?: boolean;
+} = {}): Express {
   const app = express();
   const limiter = options.limiter ?? new FixedWindowRateLimiter();
+  const config = options.config ?? testConfig;
   app.use(express.json({ limit: "64kb" }));
-  app.use(createOriginGuard(testConfig));
-  app.use("/api/auth", createAuthRouter(testConfig, limiter));
-  app.use("/api", createApiAuthorizationMiddleware(testConfig, limiter));
+  app.use(createOriginGuard(config));
+  app.use("/api/auth", createAuthRouter(config, limiter));
+  app.use("/api", createApiAuthorizationMiddleware(config, limiter));
   app.post("/api/cascade/disruptions", (request, response) => {
     const parsed = toolInputSchemas.simulate_disruption.safeParse(request.body);
     if (!parsed.success) {
@@ -145,12 +151,21 @@ async function createBrowserSession(baseUrl: string) {
   assert.ok(cookie);
   const session = await response.json() as { authenticated: boolean; csrfToken: string };
   assert.equal(session.authenticated, true);
+  assert.deepEqual(Object.keys(session).sort(), ["authenticated", "csrfToken"]);
   return { cookie, csrfToken: session.csrfToken };
 }
 
 test("production startup configuration fails closed without distinct required secrets", () => {
   assert.throws(
     () => loadSecurityConfig({ NODE_ENV: "production", CASCADE_AUTH_MODE: "production" }),
+    /CASCADE_WEB_PASSWORD/,
+  );
+  assert.throws(
+    () => loadSecurityConfig({
+      NODE_ENV: "production",
+      CASCADE_AUTH_MODE: "production",
+      DEMO_AUTH_ENABLED: "false",
+    }),
     /CASCADE_WEB_PASSWORD/,
   );
   assert.throws(
@@ -202,6 +217,23 @@ test("production startup configuration fails closed without distinct required se
   );
 });
 
+test("demo auth flag defaults to enabled unless explicitly set to false", () => {
+  const env = {
+    NODE_ENV: "production",
+    CASCADE_AUTH_MODE: "production",
+    CASCADE_WEB_PASSWORD: "test-password-long-enough",
+    CASCADE_SESSION_SECRET: "test-session-secret-long-enough-to-pass-32-bytes",
+    CASCADE_MCP_BEARER_TOKEN: "test-mcp-token-long-enough-to-pass-32-bytes",
+    CASCADE_ALLOWED_ORIGINS: origin,
+    CASCADE_TRUST_PROXY_HOPS: "1",
+  };
+  assert.equal(loadSecurityConfig(env).demoAuthEnabled, true);
+  assert.equal(loadSecurityConfig({ ...env, DEMO_AUTH_ENABLED: "true" }).demoAuthEnabled, true);
+  assert.equal(loadSecurityConfig({ ...env, DEMO_AUTH_ENABLED: "invalid" }).demoAuthEnabled, true);
+  assert.equal(loadSecurityConfig({ ...env, DEMO_AUTH_ENABLED: "FALSE" }).demoAuthEnabled, true);
+  assert.equal(loadSecurityConfig({ ...env, DEMO_AUTH_ENABLED: "false" }).demoAuthEnabled, false);
+});
+
 test("development permits localhost origins but rejects unconfigured external origins", () => {
   const config = loadSecurityConfig({ NODE_ENV: "development", CASCADE_AUTH_MODE: "development" });
   assert.equal(isAllowedOrigin("http://localhost:5173", config), true);
@@ -211,13 +243,89 @@ test("development permits localhost origins but rejects unconfigured external or
 
 test("unauthenticated browser mutations are rejected and do not reach handlers", async () => {
   await withServer(securityTestApp(), async (baseUrl) => {
+    const session = await fetch(`${baseUrl}/api/auth/session`);
+    assert.deepEqual(await session.json(), {
+      authRequired: true,
+      authenticated: false,
+      csrfToken: null,
+    });
+
     const response = await fetch(`${baseUrl}/api/cascade/disruptions`, {
       method: "POST",
       headers: { origin, "content-type": "application/json" },
       body: JSON.stringify({ materialId: "plywood", delayDays: 2 }),
     });
+
     assert.equal(response.status, 401);
     assert.deepEqual(await response.json(), { error: "Authentication required." });
+  });
+});
+
+test("public demo access issues a browser session but preserves API and MCP authorization", async () => {
+  const config = { ...testConfig, demoAuthEnabled: false };
+  await withServer(securityTestApp({ config }), async (baseUrl) => {
+    const sessionResponse = await fetch(`${baseUrl}/api/auth/session`);
+    assert.equal(sessionResponse.status, 200);
+    const session = await sessionResponse.json() as {
+      authRequired: boolean;
+      authenticated: boolean;
+      csrfToken: string | null;
+    };
+    assert.deepEqual(Object.keys(session).sort(), ["authRequired", "authenticated", "csrfToken"]);
+    assert.equal(session.authRequired, false);
+    assert.equal(session.authenticated, true);
+    const csrfToken = session.csrfToken;
+    assert.ok(csrfToken);
+    const cookie = sessionResponse.headers.get("set-cookie")?.split(";")[0];
+    assert.ok(cookie);
+
+    const withoutSession = await fetch(`${baseUrl}/api/cascade/disruptions`, {
+      method: "POST",
+      headers: { origin, "content-type": "application/json" },
+      body: JSON.stringify({ materialId: "plywood", delayDays: 2 }),
+    });
+    assert.equal(withoutSession.status, 401);
+
+    const withSession = await fetch(`${baseUrl}/api/cascade/disruptions`, {
+      method: "POST",
+      headers: {
+        origin,
+        cookie,
+        "x-csrf-token": csrfToken,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ materialId: "plywood", delayDays: 2 }),
+    });
+    assert.equal(withSession.status, 200);
+
+    const withoutBearer = await fetch(`${baseUrl}/api/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(withoutBearer.status, 401);
+
+    await withServer(securityTestApp(), async (protectedBaseUrl) => {
+      const restoredSession = await fetch(`${protectedBaseUrl}/api/auth/session`, {
+        headers: { cookie },
+      });
+      assert.deepEqual(await restoredSession.json(), {
+        authRequired: true,
+        authenticated: false,
+        csrfToken: null,
+      });
+      const restoredMutation = await fetch(`${protectedBaseUrl}/api/cascade/disruptions`, {
+        method: "POST",
+        headers: {
+          origin,
+          cookie,
+          "x-csrf-token": csrfToken,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ materialId: "plywood", delayDays: 2 }),
+      });
+      assert.equal(restoredMutation.status, 401);
+    });
   });
 });
 

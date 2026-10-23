@@ -36,6 +36,7 @@ Set secrets in the web service's secret manager. Never define backend secrets as
 | --- | --- |
 | `NODE_ENV` | Set to `production`. |
 | `CASCADE_AUTH_MODE` | Set to `production`; startup fails if production auth is not selected. |
+| `DEMO_AUTH_ENABLED` | Optional browser password-gate switch. Only the exact value `false` disables password entry; missing or invalid values keep the gate enabled. |
 | `PORT` | Supplied by the hosting platform. |
 | `DATABASE_URL` | Managed PostgreSQL connection string. Use the provider's TLS-enabled connection string and verify its certificate behavior. |
 | `CASCADE_WEB_PASSWORD` | Browser login password; at least 16 characters. |
@@ -46,6 +47,21 @@ Set secrets in the web service's secret manager. Never define backend secrets as
 | `LOG_LEVEL` | Optional Pino level; defaults to `info`. |
 
 The three authentication secrets must be distinct. Generate them outside the repository and enter them directly in the provider's secret manager. The frontend build requires `PORT` and `BASE_PATH`; `API_PROXY_TARGET` is only used by the Vite development proxy and is not needed for this same-origin production topology.
+
+### Temporary Public Demo Access
+
+The demo password gate is controlled by the API server's `DEMO_AUTH_ENABLED` environment variable. For a temporary public hackathon demo:
+
+1. In the Render dashboard, open the CASCADE web service and its **Environment** settings.
+2. Add or change `DEMO_AUTH_ENABLED` to the exact lowercase value `false`. Keep `CASCADE_WEB_PASSWORD`, `CASCADE_SESSION_SECRET`, and `CASCADE_MCP_BEARER_TOKEN` configured as secrets; do not remove or expose them.
+3. Save the environment change and let Render deploy the resulting service. If Render does not start a deploy automatically, trigger a manual deploy of the current branch.
+4. In a fresh incognito/private browser window, open the service URL. The dashboard should load without asking for the demo password. Confirm `/api/auth/session` succeeds and exercise the workflow below; do not rely on an existing browser session.
+
+When this switch is off, the browser receives a signed session and CSRF token without entering a password. The API continues to validate that session and CSRF token on browser workflow mutations, and origin validation, rate limits, explicit plan approval, and execution confirmation remain active. Because any visitor can obtain an anonymous browser session in public mode, the simulated browser workflow is intentionally public; use only fictional demo data and an appropriate demo database. MCP remains separately protected by `CASCADE_MCP_BEARER_TOKEN`.
+
+For a core workflow check, select **New demo** to create a fresh simulated scenario, choose **Cabinet-grade plywood** and a **2-day** delay, simulate the disruption, compare recovery plans with **Palmer** selected, approve the recommended feasible plan, review and confirm its simulated execution, then verify the result and action history. All data and impacts are simulated; no supplier or production system is contacted.
+
+After the hackathon, restore the password gate in the same Render **Environment** settings by setting `DEMO_AUTH_ENABLED` to `true` (or removing the variable, which securely defaults to enabled), then save and redeploy. Public-mode sessions are rejected once protection is restored. In a fresh incognito/private window, verify that the dashboard asks for the password and that only the configured password establishes a session. Keep the existing password in Render's secret configuration throughout; this repository change does not alter Render settings or deploy the service.
 
 ## Database Initialization
 
