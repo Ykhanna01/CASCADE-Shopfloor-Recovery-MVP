@@ -20,6 +20,19 @@ export async function refreshWorkspaceState({
   }
 }
 
+export async function withPendingState(setPending, operation) {
+  try {
+    setPending(true);
+    return await operation();
+  } finally {
+    setPending(false);
+  }
+}
+
+export function clearPendingScenario(pendingScenarioId, completedScenarioId) {
+  return pendingScenarioId === completedScenarioId ? null : pendingScenarioId;
+}
+
 export async function refetchAll(refetches) {
   const settled = await Promise.allSettled(refetches.map((refetch) => refetch()));
   const failed = settled.find((result) => result.status === "rejected");

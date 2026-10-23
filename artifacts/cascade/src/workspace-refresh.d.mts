@@ -5,6 +5,16 @@ export function refreshWorkspaceState(options: {
   refetch: () => Promise<void>;
 }): Promise<boolean>;
 
+export function withPendingState<T>(
+  setPending: (pending: boolean) => void,
+  operation: () => T | Promise<T>,
+): Promise<T>;
+
+export function clearPendingScenario(
+  pendingScenarioId: string | null,
+  completedScenarioId: string | null,
+): string | null;
+
 export function refetchAll<
   T extends readonly (() => Promise<unknown>)[],
 >(

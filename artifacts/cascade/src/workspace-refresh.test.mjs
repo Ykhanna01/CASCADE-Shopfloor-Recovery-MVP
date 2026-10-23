@@ -9,7 +9,29 @@ import {
   scenarioQueryKey,
   scenarioRequestHeaders,
   formatActionTimestamp,
+  clearPendingScenario,
+  withPendingState,
 } from "./workspace-refresh.mjs";
+
+test("new demo loading clears when request ID generation throws synchronously", async () => {
+  const loading = [];
+  await assert.rejects(
+    withPendingState((pending) => loading.push(pending), () => {
+      const createRequestId = () => {
+        throw new Error("UUID generation failed");
+      };
+      createRequestId();
+    }),
+    /UUID generation failed/,
+  );
+  assert.deepEqual(loading, [true, false]);
+});
+
+test("impact cleanup clears a completed inactive scenario without clearing another pending scenario", () => {
+  assert.equal(clearPendingScenario("demo-old", "demo-old"), null);
+  assert.equal(clearPendingScenario("demo-current", "demo-old"), "demo-current");
+  assert.equal(clearPendingScenario(null, "demo-old"), null);
+});
 
 test("workspace refresh waits for all refetched sections before clearing loading", async () => {
   const inFlight = { current: false };

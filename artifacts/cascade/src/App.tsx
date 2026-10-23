@@ -22,10 +22,12 @@ import { Route, Switch, useLocation, Router as WouterRouter } from 'wouter';
 import {
   refetchAll,
   formatActionTimestamp,
+  clearPendingScenario,
   requestWithTimeout,
   refreshActionHistory,
   refetchHistoryForWorkspace,
   refreshWorkspaceState,
+  withPendingState,
   scenarioQueryKey,
   scenarioRequestHeaders,
 } from './workspace-refresh.mjs';
@@ -292,14 +294,14 @@ function Home() {
             if (scenarioIdRef.current === scenarioId) setImpact(null);
             throw error;
           } finally {
-            if (scenarioIdRef.current === scenarioId) setImpactPendingScenario(null);
+            setImpactPendingScenario((pendingScenarioId) => clearPendingScenario(pendingScenarioId, scenarioId));
           }
         } else {
           setImpact(null);
         }
       },
     });
-    if (scenarioIdRef.current === scenarioId) setImpactPendingScenario(null);
+    setImpactPendingScenario((pendingScenarioId) => clearPendingScenario(pendingScenarioId, scenarioId));
     return refreshed;
   };
 
@@ -334,78 +336,79 @@ function Home() {
     if (newDemoInFlight.current) return;
     newDemoInFlight.current = true;
     let createdScenarioId: string | null = null;
-    setNewDemoPending(true);
     setWorkspaceError('');
     setNotice('');
-    if (!newDemoRequestId.current) newDemoRequestId.current = window.crypto.randomUUID();
     try {
-      const created = await customFetch<{ scenarioId: string; state: ShopState }>(
-        '/api/cascade/scenarios',
-        {
-          method: 'POST',
-          body: JSON.stringify({ requestId: newDemoRequestId.current }),
-        },
-      );
-      createdScenarioId = created.scenarioId;
-      const scenarioStored = saveActiveScenarioId(created.scenarioId);
-      scenarioIdRef.current = created.scenarioId;
-      setScenarioId(created.scenarioId);
-      queryClient.setQueryData(
-        scenarioQueryKey(getGetShopStateQueryKey(), created.scenarioId),
-        created.state,
-      );
-      queryClient.setQueryData(
-        scenarioQueryKey(getGetActionHistoryQueryKey(), created.scenarioId),
-        [],
-      );
-      setHistoryRefreshStatus({
-        scenarioId: created.scenarioId,
-        pending: false,
-        error: '',
-        message: '',
+      await withPendingState(setNewDemoPending, async () => {
+        if (!newDemoRequestId.current) newDemoRequestId.current = window.crypto.randomUUID();
+        const created = await customFetch<{ scenarioId: string; state: ShopState }>(
+          '/api/cascade/scenarios',
+          {
+            method: 'POST',
+            body: JSON.stringify({ requestId: newDemoRequestId.current }),
+          },
+        );
+        createdScenarioId = created.scenarioId;
+        const scenarioStored = saveActiveScenarioId(created.scenarioId);
+        scenarioIdRef.current = created.scenarioId;
+        setScenarioId(created.scenarioId);
+        queryClient.setQueryData(
+          scenarioQueryKey(getGetShopStateQueryKey(), created.scenarioId),
+          created.state,
+        );
+        queryClient.setQueryData(
+          scenarioQueryKey(getGetActionHistoryQueryKey(), created.scenarioId),
+          [],
+        );
+        setHistoryRefreshStatus({
+          scenarioId: created.scenarioId,
+          pending: false,
+          error: '',
+          message: '',
+        });
+        simulateMutation.reset();
+        proposeMutation.reset();
+        approveMutation.reset();
+        executeMutation.reset();
+        verifyMutation.reset();
+        setScenarioText(DEMO_PROMPT);
+        setMaterialId('');
+        setDelayDays('2');
+        setImpact(null);
+        setAlternatives([]);
+        setActivePlanId('');
+        setTargetOrderId('PAL-204');
+        setVerification(null);
+        setConfirmExecuteId('');
+        setExecutionAcknowledged(false);
+        analyzedDisruptionId.current = '';
+        restoredVerificationPlanId.current = '';
+        const refreshed = await refetchAll([
+          () => queryClient.fetchQuery({
+            queryKey: scenarioQueryKey(getGetShopStateQueryKey(), created.scenarioId),
+            queryFn: ({ signal }) => getShopState({
+              signal,
+              headers: scenarioRequestHeaders(created.scenarioId),
+            }),
+            staleTime: 0,
+          }),
+          () => queryClient.fetchQuery({
+            queryKey: scenarioQueryKey(getGetActionHistoryQueryKey(), created.scenarioId),
+            queryFn: ({ signal }) => getActionHistory({
+              signal,
+              headers: scenarioRequestHeaders(created.scenarioId),
+            }),
+            staleTime: 0,
+          }),
+          () => health.refetch({ throwOnError: true }),
+        ] as const);
+        if (refreshed[2].isError) throw refreshed[2].error;
+        if (!refreshed[0]) throw new Error('The API returned no workshop state for the new demo.');
+        newDemoRequestId.current = '';
+        setNotice(scenarioStored
+          ? 'A fresh simulated demo started. The previous run and its audit history were preserved.'
+          : 'A fresh simulated demo is active for this tab only because browser storage and URL persistence were unavailable.');
       });
-      simulateMutation.reset();
-      proposeMutation.reset();
-      approveMutation.reset();
-      executeMutation.reset();
-      verifyMutation.reset();
-      setScenarioText(DEMO_PROMPT);
-      setMaterialId('');
-      setDelayDays('2');
-      setImpact(null);
-      setAlternatives([]);
-      setActivePlanId('');
-      setTargetOrderId('PAL-204');
-      setVerification(null);
-      setConfirmExecuteId('');
-      setExecutionAcknowledged(false);
-      analyzedDisruptionId.current = '';
-      restoredVerificationPlanId.current = '';
-      const refreshed = await refetchAll([
-        () => queryClient.fetchQuery({
-          queryKey: scenarioQueryKey(getGetShopStateQueryKey(), created.scenarioId),
-          queryFn: ({ signal }) => getShopState({
-            signal,
-            headers: scenarioRequestHeaders(created.scenarioId),
-          }),
-          staleTime: 0,
-        }),
-        () => queryClient.fetchQuery({
-          queryKey: scenarioQueryKey(getGetActionHistoryQueryKey(), created.scenarioId),
-          queryFn: ({ signal }) => getActionHistory({
-            signal,
-            headers: scenarioRequestHeaders(created.scenarioId),
-          }),
-          staleTime: 0,
-        }),
-        () => health.refetch({ throwOnError: true }),
-      ] as const);
-      if (refreshed[2].isError) throw refreshed[2].error;
-      if (!refreshed[0]) throw new Error('The API returned no workshop state for the new demo.');
-      newDemoRequestId.current = '';
-      setNotice(scenarioStored
-        ? 'A fresh simulated demo started. The previous run and its audit history were preserved.'
-        : 'A fresh simulated demo is active for this tab only because browser storage and URL persistence were unavailable.');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unable to start a new demo.';
       setWorkspaceError(createdScenarioId
@@ -413,7 +416,6 @@ function Home() {
         : message);
     } finally {
       newDemoInFlight.current = false;
-      setNewDemoPending(false);
     }
   };
   const errorText = workspaceError || (firstError instanceof Error ? firstError.message : firstError ? 'The service could not complete that request.' : '');
@@ -438,7 +440,7 @@ function Home() {
         setWorkspaceError(error instanceof Error ? error.message : 'Impact analysis could not be completed.');
       }
     }).finally(() => {
-      if (scenarioIdRef.current === scenarioId) setImpactPendingScenario(null);
+      setImpactPendingScenario((pendingScenarioId) => clearPendingScenario(pendingScenarioId, scenarioId));
     });
   }, [authSession.checked, authSession.required, authSession.authenticated, scenarioId, state?.disruption?.id]);
 
@@ -530,7 +532,7 @@ function Home() {
         setWorkspaceError(error instanceof Error ? error.message : 'Impact analysis could not be completed.');
       }
     } finally {
-      if (scenarioIdRef.current === scenarioId) setImpactPendingScenario(null);
+      setImpactPendingScenario((pendingScenarioId) => clearPendingScenario(pendingScenarioId, scenarioId));
     }
   };
 
