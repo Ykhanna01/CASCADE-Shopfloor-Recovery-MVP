@@ -378,6 +378,16 @@ test("execution requires approval, is idempotent, and verification matches persi
   assert.equal(verification.result.stateMatches, true);
   assert.equal(verification.result.onTimeOrders, 8);
   assert.equal(verification.result.lateOrders, 0);
+  assert.deepEqual(
+    verification.state.actionHistory.map((event) => event.action),
+    [
+      "disruption_simulated",
+      "recovery_proposed",
+      "recovery_approved",
+      "recovery_executed",
+      "recovery_verified",
+    ],
+  );
   assertIndependentScheduleChecks(verification.state);
   assert.equal(
     verification.state.plans.find((item) => item.id === plan.id)?.status,

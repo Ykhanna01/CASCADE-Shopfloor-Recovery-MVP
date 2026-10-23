@@ -30,12 +30,48 @@ export async function refetchAll(refetches) {
   });
 }
 
+export async function requestWithTimeout(request, timeoutMs = 20000) {
+  const controller = new AbortController();
+  let timeoutId;
+  const timeoutError = new Error("Request timed out. Check the connection and try again.");
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      controller.abort(timeoutError);
+      reject(timeoutError);
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => request(controller.signal)),
+      timeout,
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 export function scenarioQueryKey(queryKey, scenarioId) {
   return [...queryKey, scenarioId ?? "northstar-demo"];
 }
 
 export function scenarioRequestHeaders(scenarioId) {
   return scenarioId ? { "x-cascade-scenario-id": scenarioId } : {};
+}
+
+export function formatActionTimestamp(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? value
+    : new Intl.DateTimeFormat("en-US", {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        second: "2-digit",
+        timeZone: "UTC",
+        timeZoneName: "short",
+      }).format(date);
 }
 
 export async function refetchHistoryForWorkspace({

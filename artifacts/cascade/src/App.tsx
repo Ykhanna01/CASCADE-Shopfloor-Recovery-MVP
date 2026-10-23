@@ -7,8 +7,8 @@ import {
   LogOut, Mic, Package, Radio, RefreshCw, ShieldCheck, Siren, Truck, WandSparkles, X,
 } from 'lucide-react';
 import {
-  getActionHistory, getGetActionHistoryQueryKey, getGetShopStateQueryKey, getHealthCheckQueryKey, getShopState,
-  useAnalyzeImpact, useApproveRecovery, useExecuteRecovery, useGetActionHistory,
+  analyzeImpact, getActionHistory, getGetActionHistoryQueryKey, getGetShopStateQueryKey, getHealthCheckQueryKey, getShopState,
+  healthCheck, useApproveRecovery, useExecuteRecovery, useGetActionHistory,
   useGetShopState, useHealthCheck, useProposeRecovery, useSimulateDisruption,
   useVerifyRecovery,
 } from '@workspace/api-client-react';
@@ -21,6 +21,8 @@ import NotFound from '@/pages/not-found';
 import { Route, Switch, useLocation, Router as WouterRouter } from 'wouter';
 import {
   refetchAll,
+  formatActionTimestamp,
+  requestWithTimeout,
   refreshActionHistory,
   refetchHistoryForWorkspace,
   refreshWorkspaceState,
@@ -145,7 +147,6 @@ function Home() {
   const history = useGetActionHistory({ query: { queryKey: historyQueryKey } });
   const health = useHealthCheck();
   const simulateMutation = useSimulateDisruption();
-  const analyzeMutation = useAnalyzeImpact();
   const proposeMutation = useProposeRecovery();
   const approveMutation = useApproveRecovery();
   const executeMutation = useExecuteRecovery();
@@ -154,6 +155,7 @@ function Home() {
   const [materialId, setMaterialId] = useState('');
   const [delayDays, setDelayDays] = useState('2');
   const [impact, setImpact] = useState<ImpactAnalysis | null>(null);
+  const [impactPendingScenario, setImpactPendingScenario] = useState<string | null>(null);
   const [alternatives, setAlternatives] = useState<RecoveryPlan[]>([]);
   const [activePlanId, setActivePlanId] = useState('');
   const [targetOrderId, setTargetOrderId] = useState('PAL-204');
@@ -174,6 +176,7 @@ function Home() {
     message: '',
   });
   const refreshInFlight = useRef(false);
+  const impactRequests = useRef(new Map<string, Promise<ImpactAnalysis>>());
   const newDemoInFlight = useRef(false);
   const newDemoRequestId = useRef('');
   const historyRefreshInFlight = useRef(new Set<string | null>());
@@ -215,51 +218,96 @@ function Home() {
   const selectedPlanChanges = activePlan ? tasks.filter((task) => activePlan.affectedOrders.includes(task.orderId)) : [];
   const recoveredMaterial = materials.find((material) => material.id === activeDisruption?.materialId);
   const selectedMaterial = materials.find((material) => material.id === selectedMaterialId);
-  const anyPending = simulateMutation.isPending || analyzeMutation.isPending || proposeMutation.isPending ||
+  const impactPending = impactPendingScenario === scenarioId;
+  const anyPending = simulateMutation.isPending || impactPending || proposeMutation.isPending ||
     approveMutation.isPending || executeMutation.isPending || verifyMutation.isPending ||
     refreshPending || newDemoPending;
-  const firstError = shop.error || simulateMutation.error || analyzeMutation.error ||
+  const firstError = shop.error || simulateMutation.error ||
     proposeMutation.error || approveMutation.error || executeMutation.error || verifyMutation.error;
 
-  const refreshWorkspace = () => refreshWorkspaceState({
-    inFlight: refreshInFlight,
-    setLoading: setRefreshPending,
-    setError: setWorkspaceError,
-    refetch: async () => {
-      const results = await refetchAll([
-        () => shop.refetch({ throwOnError: true }),
-        () => refetchHistoryForWorkspace({
-          scenarioId,
-          isCurrentScenario: () => scenarioIdRef.current === scenarioId,
-          setStatus: setHistoryRefreshStatus,
-          refetch: () => history.refetch({ throwOnError: true }),
-        }),
-        () => health.refetch({ throwOnError: true }),
-      ] as const);
-      const failedResult = results.find((result) => result.isError);
-      if (failedResult?.isError) throw failedResult.error;
-      const refreshedState = results[0]?.data;
-      if (!refreshedState) throw new Error('The API returned no workshop state.');
+  const requestImpact = (requestedScenarioId: string | null) => {
+    const key = requestedScenarioId ?? 'northstar-demo';
+    const existing = impactRequests.current.get(key);
+    if (existing) return existing;
+    const request = requestWithTimeout((signal) => analyzeImpact({
+      signal,
+      headers: scenarioRequestHeaders(requestedScenarioId),
+    }));
+    impactRequests.current.set(key, request);
+    void request.then(
+      () => { if (impactRequests.current.get(key) === request) impactRequests.current.delete(key); },
+      () => { if (impactRequests.current.get(key) === request) impactRequests.current.delete(key); },
+    );
+    return request;
+  };
 
-      setAlternatives([]);
-      setActivePlanId('');
-      setVerification(null);
-      restoredVerificationPlanId.current = '';
-      const disruptionId = refreshedState.disruption?.id ?? '';
-      analyzedDisruptionId.current = disruptionId;
-      if (disruptionId) {
-        const refreshedImpact = await analyzeMutation.mutateAsync();
-        setImpact(refreshedImpact);
-      } else {
-        setImpact(null);
-      }
-    },
-  });
+  const refreshWorkspace = async () => {
+    if (scenarioIdRef.current === scenarioId) {
+      setImpact(null);
+      if (state?.disruption) setImpactPendingScenario(scenarioId);
+    }
+    const refreshed = await refreshWorkspaceState({
+      inFlight: refreshInFlight,
+      setLoading: setRefreshPending,
+      setError: setWorkspaceError,
+      refetch: async () => {
+        const results = await refetchAll([
+          () => requestWithTimeout((signal) => getShopState({
+            signal,
+            headers: scenarioRequestHeaders(scenarioId),
+          })),
+          () => refetchHistoryForWorkspace({
+            scenarioId,
+            isCurrentScenario: () => scenarioIdRef.current === scenarioId,
+            setStatus: setHistoryRefreshStatus,
+            refetch: () => requestWithTimeout((signal) => getActionHistory({
+              signal,
+              headers: scenarioRequestHeaders(scenarioId),
+            })),
+          }),
+          () => requestWithTimeout((signal) => healthCheck({ signal })),
+        ] as const);
+        const refreshedState = results[0];
+        if (!refreshedState) throw new Error('The API returned no workshop state.');
+        queryClient.setQueryData(shopQueryKey, refreshedState);
+        queryClient.setQueryData(historyQueryKey, results[1]);
+        queryClient.setQueryData(getHealthCheckQueryKey(), results[2]);
+        if (scenarioIdRef.current !== scenarioId) return;
+
+        setAlternatives([]);
+        setActivePlanId('');
+        setVerification(null);
+        restoredVerificationPlanId.current = '';
+        const disruptionId = refreshedState.disruption?.id ?? '';
+        analyzedDisruptionId.current = disruptionId
+          ? `${scenarioId ?? 'northstar-demo'}:${disruptionId}`
+          : '';
+        if (disruptionId) {
+          setImpact(null);
+          setImpactPendingScenario(scenarioId);
+          try {
+            const refreshedImpact = await requestImpact(scenarioId);
+            if (scenarioIdRef.current === scenarioId) setImpact(refreshedImpact);
+          } catch (error) {
+            if (scenarioIdRef.current === scenarioId) setImpact(null);
+            throw error;
+          } finally {
+            if (scenarioIdRef.current === scenarioId) setImpactPendingScenario(null);
+          }
+        } else {
+          setImpact(null);
+        }
+      },
+    });
+    if (scenarioIdRef.current === scenarioId) setImpactPendingScenario(null);
+    return refreshed;
+  };
 
   const refreshCurrentDemo = async () => {
     setNotice('');
+    setWorkspaceError('');
     const refreshed = await refreshWorkspace();
-    if (refreshed) {
+    if (refreshed && scenarioIdRef.current === scenarioId) {
       setNotice('Current demo reloaded from saved state. No scenario was created or reset.');
     }
   };
@@ -269,14 +317,17 @@ function Home() {
     inFlight: historyRefreshInFlight,
     isCurrentScenario: () => scenarioIdRef.current === scenarioId,
     setStatus: setHistoryRefreshStatus,
-    refetch: (requestedScenarioId) => queryClient.fetchQuery({
-      queryKey: scenarioQueryKey(getGetActionHistoryQueryKey(), requestedScenarioId),
-      queryFn: ({ signal }) => getActionHistory({
+    refetch: async (requestedScenarioId) => {
+      const actions = await requestWithTimeout((signal) => getActionHistory({
         signal,
         headers: scenarioRequestHeaders(requestedScenarioId),
-      }),
-      staleTime: 0,
-    }),
+      }));
+      queryClient.setQueryData(
+        scenarioQueryKey(getGetActionHistoryQueryKey(), requestedScenarioId),
+        actions,
+      );
+      return actions;
+    },
   });
 
   const startNewDemo = async () => {
@@ -314,7 +365,6 @@ function Home() {
         message: '',
       });
       simulateMutation.reset();
-      analyzeMutation.reset();
       proposeMutation.reset();
       approveMutation.reset();
       executeMutation.reset();
@@ -376,13 +426,21 @@ function Home() {
       setImpact(null);
       return;
     }
-    if (analyzedDisruptionId.current === disruption.id) return;
-    analyzedDisruptionId.current = disruption.id;
+    const disruptionKey = `${scenarioId ?? 'northstar-demo'}:${disruption.id}`;
+    if (analyzedDisruptionId.current === disruptionKey) return;
+    analyzedDisruptionId.current = disruptionKey;
     setImpact(null);
-    analyzeMutation.mutate(undefined, {
-      onSuccess: (result) => setImpact(result),
+    setImpactPendingScenario(scenarioId);
+    void requestImpact(scenarioId).then((result) => {
+      if (scenarioIdRef.current === scenarioId) setImpact(result);
+    }).catch((error: unknown) => {
+      if (scenarioIdRef.current === scenarioId) {
+        setWorkspaceError(error instanceof Error ? error.message : 'Impact analysis could not be completed.');
+      }
+    }).finally(() => {
+      if (scenarioIdRef.current === scenarioId) setImpactPendingScenario(null);
     });
-  }, [authSession.checked, authSession.required, authSession.authenticated, state?.disruption?.id]);
+  }, [authSession.checked, authSession.required, authSession.authenticated, scenarioId, state?.disruption?.id]);
 
   useEffect(() => {
     if (!state?.plans.length) return;
@@ -448,7 +506,7 @@ function Home() {
     simulateMutation.mutate({ data: { materialId: selectedMaterialId, delayDays: Number(delayDays) } }, {
       onSuccess: (result) => {
         setImpact(result);
-        analyzedDisruptionId.current = result.disruption.id;
+        analyzedDisruptionId.current = `${scenarioId ?? 'northstar-demo'}:${result.disruption.id}`;
         setAlternatives([]);
         setActivePlanId('');
         refreshWorkspace();
@@ -456,9 +514,25 @@ function Home() {
     });
   };
 
-  const recalculateImpact = () => analyzeMutation.mutate(undefined, {
-    onSuccess: (result) => { setImpact(result); setNotice('Impact recalculated from the current simulated shop state.'); refreshWorkspace(); },
-  });
+  const recalculateImpact = async () => {
+    setWorkspaceError('');
+    setNotice('');
+    setImpactPendingScenario(scenarioId);
+    try {
+      const result = await requestImpact(scenarioId);
+      if (scenarioIdRef.current === scenarioId) {
+        setImpact(result);
+        setNotice('Impact recalculated from the current simulated shop state.');
+      }
+    } catch (error) {
+      if (scenarioIdRef.current === scenarioId) {
+        setImpact(null);
+        setWorkspaceError(error instanceof Error ? error.message : 'Impact analysis could not be completed.');
+      }
+    } finally {
+      if (scenarioIdRef.current === scenarioId) setImpactPendingScenario(null);
+    }
+  };
 
   const proposeRecovery = (orderId: string) => {
     setNotice('');
@@ -620,7 +694,7 @@ function Home() {
       </ol>
 
       {errorText && <div role="alert" data-testid="status-request-error" className="mb-4 flex items-center justify-between gap-3 rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
-        <span><strong>Request did not complete.</strong> {errorText}</span><Button kind="quiet" testId="button-dismiss-error" onClick={() => { setWorkspaceError(''); simulateMutation.reset(); analyzeMutation.reset(); proposeMutation.reset(); approveMutation.reset(); executeMutation.reset(); verifyMutation.reset(); }}><X size={15} /> Dismiss</Button>
+        <span><strong>Request did not complete.</strong> {errorText}</span><span className="flex items-center gap-2">{workspaceError && <Button kind="secondary" testId="button-retry-workspace-refresh" disabled={anyPending} onClick={() => { void refreshCurrentDemo(); }}><RefreshCw size={14} /> Retry refresh</Button>}<Button kind="quiet" testId="button-dismiss-error" onClick={() => { setWorkspaceError(''); simulateMutation.reset(); proposeMutation.reset(); approveMutation.reset(); executeMutation.reset(); verifyMutation.reset(); }}><X size={15} /> Dismiss</Button></span>
       </div>}
       {notice && <div role="status" data-testid="status-action-notice" className="mb-4 flex items-center justify-between rounded-md border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-sm text-emerald-900"><span className="flex items-center gap-2"><CheckCircle2 size={16} />{notice}</span><button aria-label="Dismiss message" data-testid="button-dismiss-notice" onClick={() => setNotice('')}><X size={15} /></button></div>}
 
@@ -667,7 +741,7 @@ function Home() {
           <section className="panel" aria-labelledby="impact-heading">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[hsl(var(--border))] px-5 py-3.5">
               <div className="flex items-center gap-2"><div className="flex h-7 w-7 items-center justify-center rounded bg-amber-100 text-amber-800"><Activity size={16} /></div><h2 id="impact-heading" className="text-sm font-semibold">Impact & dependencies</h2></div>
-              <div className="flex items-center gap-2"><span className="eyebrow">02 / Shop-floor exposure</span><Button kind="quiet" testId="button-recalculate-impact" onClick={recalculateImpact} disabled={anyPending}><RefreshCw size={13} className={analyzeMutation.isPending ? 'animate-spin' : ''} /> {analyzeMutation.isPending ? 'Analyzing' : 'Recalculate'}</Button></div>
+              <div className="flex items-center gap-2"><span className="eyebrow">02 / Shop-floor exposure</span><Button kind="quiet" testId="button-recalculate-impact" onClick={() => { void recalculateImpact(); }} disabled={anyPending}><RefreshCw size={13} className={impactPending ? 'animate-spin' : ''} /> {impactPending ? 'Analyzing' : 'Recalculate'}</Button></div>
             </div>
             {activeDisruption ? <div className="p-5">
               <div className="flex flex-col justify-between gap-3 rounded-md border border-amber-200 bg-amber-50/75 p-4 sm:flex-row sm:items-center">
@@ -680,8 +754,8 @@ function Home() {
                 {impact && affectedOrderIds.length > 0 && <span className="font-medium text-amber-900">{impact.affectedOrderIds.length} commitments exposed to the stock gap</span>}
                 {impact && affectedOrderIds.length === 0 && <span className="font-medium text-emerald-800">No orders currently exposed on the persisted schedule</span>}
               </div>
-              {analyzeMutation.isPending && !impact ? <div className="my-4 flex items-center gap-2 rounded border border-[hsl(var(--border))] bg-[hsl(var(--background))] px-3 py-3 text-xs text-muted-foreground" role="status" data-testid="status-impact-loading"><RefreshCw size={14} className="animate-spin text-primary" /> Restoring impact analysis from the simulated shop state…</div> :
-                analyzeMutation.isError && !impact ? <div className="my-4 flex items-center justify-between gap-3 rounded border border-rose-200 bg-rose-50 px-3 py-3 text-xs text-rose-900" role="alert" data-testid="status-impact-error"><span>Impact analysis could not be restored. {analyzeMutation.error instanceof Error ? analyzeMutation.error.message : 'Try recalculating.'}</span><Button kind="secondary" testId="button-retry-impact" onClick={recalculateImpact}><RefreshCw size={13} /> Retry</Button></div> :
+              {impactPending && !impact ? <div className="my-4 flex items-center gap-2 rounded border border-[hsl(var(--border))] bg-[hsl(var(--background))] px-3 py-3 text-xs text-muted-foreground" role="status" data-testid="status-impact-loading"><RefreshCw size={14} className="animate-spin text-primary" /> Restoring impact analysis from the simulated shop state…</div> :
+                workspaceError && !impact ? <div className="my-4 flex items-center justify-between gap-3 rounded border border-rose-200 bg-rose-50 px-3 py-3 text-xs text-rose-900" role="alert" data-testid="status-impact-error"><span>Impact analysis could not be restored. {workspaceError}</span><Button kind="secondary" testId="button-retry-impact" onClick={() => { void recalculateImpact(); }}><RefreshCw size={13} /> Retry</Button></div> :
                 <p className="my-4 text-sm leading-relaxed text-muted-foreground" data-testid="text-impact-summary">{impact?.summary || 'A simulated disruption is active. Its affected orders and tasks will appear after analysis completes.'}</p>}
               {impact && affectedOrderIds.length > 0 ? <div className="mb-4 flex flex-wrap gap-2" data-testid="list-affected-orders">
                 {affectedOrderIds.map((id) => {
@@ -978,8 +1052,7 @@ function formatWeekday(value: string) {
 }
 function formatTime(value: string) {
   if (!value) return 'unknown time';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(date);
+  return formatActionTimestamp(value);
 }
 
 function Router() {

@@ -13,6 +13,11 @@ export function refetchAll<
   [K in keyof T]: T[K] extends () => Promise<infer Result> ? Result : never;
 }>;
 
+export function requestWithTimeout<T>(
+  request: (signal: AbortSignal) => Promise<T>,
+  timeoutMs?: number,
+): Promise<T>;
+
 export function scenarioQueryKey(
   queryKey: readonly unknown[],
   scenarioId: string | null,
@@ -21,6 +26,8 @@ export function scenarioQueryKey(
 export function scenarioRequestHeaders(
   scenarioId: string | null,
 ): Record<string, string>;
+
+export function formatActionTimestamp(value: string): string;
 
 export interface ActionHistoryRefreshStatus {
   scenarioId: string | null;

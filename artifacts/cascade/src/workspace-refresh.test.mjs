@@ -5,8 +5,10 @@ import {
   refreshActionHistory,
   refetchHistoryForWorkspace,
   refreshWorkspaceState,
+  requestWithTimeout,
   scenarioQueryKey,
   scenarioRequestHeaders,
+  formatActionTimestamp,
 } from "./workspace-refresh.mjs";
 
 test("workspace refresh waits for all refetched sections before clearing loading", async () => {
@@ -112,6 +114,40 @@ test("workspace refresh prevents overlapping requests", async () => {
   assert.equal(await first, true);
 });
 
+test("a timed-out workspace request stops loading and a retry succeeds", async () => {
+  const inFlight = { current: false };
+  const loading = [];
+  const errors = [];
+  let calls = 0;
+  const options = {
+    inFlight,
+    setLoading: (value) => loading.push(value),
+    setError: (value) => errors.push(value),
+    refetch: () => {
+      calls += 1;
+      return calls === 1
+        ? requestWithTimeout((signal) => new Promise((resolve, reject) => {
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          }), 5)
+        : requestWithTimeout(async () => ({ state: "refreshed" }), 50);
+    },
+  };
+
+  assert.equal(await refreshWorkspaceState(options), false);
+  assert.match(errors.at(-1), /timed out/i);
+  assert.equal(loading.at(-1), false);
+  assert.equal(inFlight.current, false);
+
+  assert.equal(await refreshWorkspaceState(options), true);
+  assert.equal(calls, 2);
+  assert.deepEqual(loading, [true, false, true, false]);
+  assert.deepEqual(errors, [
+    "",
+    "Request timed out. Check the connection and try again.",
+    "",
+  ]);
+});
+
 test("scenario query keys and request headers isolate the selected demo", () => {
   const baseKey = ["/api/cascade/actions"];
   assert.notDeepEqual(
@@ -126,6 +162,15 @@ test("scenario query keys and request headers isolate the selected demo", () => 
     "x-cascade-scenario-id": "demo-first",
   });
   assert.deepEqual(scenarioRequestHeaders(null), {});
+});
+
+test("action timestamps show seconds and use UTC consistently", () => {
+  const first = formatActionTimestamp("2026-10-22T12:16:01.000Z");
+  const second = formatActionTimestamp("2026-10-22T12:16:42.000Z");
+  assert.match(first, /UTC$/);
+  assert.match(second, /UTC$/);
+  assert.notEqual(first, second);
+  assert.equal(formatActionTimestamp("invalid timestamp"), "invalid timestamp");
 });
 
 test("action history refresh exposes loading and success even when the history is unchanged", async () => {
